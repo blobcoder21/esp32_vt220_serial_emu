@@ -347,11 +347,17 @@ void dispatchCSI(char cmd) {
           curBG = p - 100 + 8; // bright bg
         } else if (p == 38 && i + 2 < csiParamCount && csiParams[i+1] == 5) {
           // ESC[38;5;nm — xterm-256 fg
-          curFG = (uint8_t)min(255, max(0, csiParams[i + 2]));
+          int16_t val = csiParams[i + 2];
+          if (val < 0) val = 0;
+          if (val > 255) val = 255;
+          curFG = (uint8_t)val;
           i += 2;
         } else if (p == 48 && i + 2 < csiParamCount && csiParams[i+1] == 5) {
           // ESC[48;5;nm — xterm-256 bg
-          curBG = (uint8_t)min(255, max(0, csiParams[i + 2]));
+          int16_t val = csiParams[i + 2];
+          if (val < 0) val = 0;
+          if (val > 255) val = 255;
+          curBG = (uint8_t)val;
           i += 2;
         }
         // 38;2;r;g;b truecolor — map to nearest 256 not implemented, skip
