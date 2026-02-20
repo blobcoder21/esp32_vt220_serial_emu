@@ -154,8 +154,15 @@ void scrollUp() {
 
 // ── Cursor movement ───────────────────────────────────────────
 void moveCursor(int16_t col, int16_t row) {
+  int16_t ox = curX, oy = curY;
   curX = constrain(col, 0, COLS - 1);
   curY = constrain(row, 0, ROWS - 1);
+  if (ox != curX || oy != curY) {
+    drawCell(ox, oy);  // erase cursor from old position
+    drawCursorBlock();
+    cursorBlinkLast = millis();
+    cursorBlinkOn = true;
+  }
 }
 
 void cursorAdvance() {
@@ -178,6 +185,9 @@ void putChar(char ch) {
   c.bg = curBG;
   drawCell(curX, curY);
   cursorAdvance();
+  drawCursorBlock();
+  cursorBlinkLast = millis();
+  cursorBlinkOn = true;
 }
 
 // ── CSI dispatch ──────────────────────────────────────────────
@@ -326,10 +336,14 @@ void processByte(uint8_t b) {
         memset(csiParams, 0, sizeof(csiParams));
         memset(csiInter, 0, sizeof(csiInter));
       } else if (b == 'c') {
-        // Full reset
+        // Full reset (RIS)
         curFG = DEFAULT_FG;
         curBG = DEFAULT_BG;
         moveCursor(0, 0);
+        if (screen) {
+          for (int16_t i = 0; i < COLS * ROWS; i++)
+            screen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
+        }
         tft.fillScreen(xterm256(DEFAULT_BG));
         parserState = S_NORMAL;
       } else {
@@ -387,6 +401,20 @@ void setup() {
   pinMode(LOGIN_BTN, INPUT_PULLDOWN);
 }
 
+// ── Cursor blink (call from loop) ─────────────────────────────
+void updateCursorBlink() {
+  if (!cursorVisible || !screen) return;
+  uint32_t now = millis();
+  if (now - cursorBlinkLast >= CURSOR_BLINK_MS) {
+    cursorBlinkLast = now;
+    cursorBlinkOn = !cursorBlinkOn;
+    if (cursorBlinkOn)
+      drawCursorBlock();
+    else
+      drawCell(curX, curY);
+  }
+}
+
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
   // Drain serial into parser
@@ -394,10 +422,11 @@ void loop() {
     processByte((uint8_t)Serial.read());
   }
 
-  //Login button — sends username then password on second press
+  updateCursorBlink();
+
+  // Login button — sends username then password on second press
   if (digitalRead(LOGIN_BTN) == HIGH) {
     Serial.print("pfetch\r");
     while (digitalRead(LOGIN_BTN) == HIGH);
   }
-  
 }
