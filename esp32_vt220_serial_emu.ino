@@ -21,21 +21,25 @@
 
 #include <TFT_eSPI.h>
 #include <SPI.h>
-#include "font_6x10.h" //Will include Terminus once it is converted.//////////////////.
+#include "fonts/iosevka_ascii.h"
+#include "fonts/iosevka_box.h"
+#include "fonts/iosevka_blocks.h"
+#include "fonts/iosevka_braille.h"
 
-// Use compiled 6x10 bitmap font (Terminus-style). Undef to use TFT_eSPI built-in font 1.
-#define USE_TERMINUS_FONT  1
+// Use Iosevka GFX fonts. Undef to use TFT_eSPI built-in font 1.
+#define USE_IOSEVKA_FONT  1
 
 TFT_eSPI tft = TFT_eSPI();
 
 // ── Grid dimensions ──────────────────────────────────────────
-#define CHAR_W       6    // font 1 character width  (pixels)
-#define CHAR_H      10    // font 1 character height (pixels) -- adjust if needed
-#define FONT_NUM     1
+#define CHAR_W       6    // Iosevka character width (pixels) - fixed for terminal
+#define CHAR_H      12    // Iosevka character height (yAdvance from font)
+#define FONT_NUM     1    // fallback font number
 
 #define COLS        40    // (240 / 6)
-#define ROWS        32    // (320 / 10)
+#define ROWS        26    // (320 / 12) - adjusted for Iosevka yAdvance
 
+// Change SCREEN_W, SCREEN_H if needed
 #define SCREEN_W   240
 #define SCREEN_H   320
 
@@ -109,27 +113,47 @@ uint16_t xterm256(uint8_t idx) {
   return rgb888to565(r, g, b);
 }
 
+// ── Font lookup ───────────────────────────────────────────────
+// Returns GFXfont* for given Unicode codepoint, or nullptr if not found
+const GFXfont* getFontForChar(uint16_t codepoint) {
+  if (codepoint >= 0x0020 && codepoint <= 0x007E) {
+    return &IosevkaASCII;
+  } else if (codepoint >= 0x2500 && codepoint <= 0x257F) {
+    return &IosevkaBox;
+  } else if (codepoint >= 0x2580 && codepoint <= 0x259F) {
+    return &IosevkaBlocks;
+  } else if (codepoint >= 0x2800 && codepoint <= 0x28FF) {
+    return &IosevkaBraille;
+  }
+  return nullptr;
+}
+
 // ── Cell helpers ──────────────────────────────────────────────
 inline Cell& cellAt(int16_t col, int16_t row) {
   return screen[row * COLS + col];
 }
 
-// Draw one 6x10 glyph from font_6x10 at (x,y). Uses 6 LSBs per row.
-void drawChar6x10(TFT_eSPI& tft, int16_t x, int16_t y, unsigned char c, uint16_t fg, uint16_t bg) {
-  if (c < FONT_6X10_FIRST || c > FONT_6X10_LAST) c = ' ';
-  const uint8_t* glyph = font6x10_data + (c - FONT_6X10_FIRST) * FONT_6X10_H;
-  for (int16_t row = 0; row < FONT_6X10_H; row++) {
-    uint8_t bits = pgm_read_byte(glyph + row) & 0x3F;
-    for (int16_t col = 0; col < FONT_6X10_W; col++) {
-      uint16_t color = (bits & (1 << (FONT_6X10_W - 1 - col))) ? fg : bg;
-      tft.drawPixel(x + col, y + row, color);
-    }
-  }
-}
-
+// Draw one character using Iosevka GFX fonts at fixed cell position
 static inline void drawCharAt(int16_t x, int16_t y, char ch, uint16_t fg565, uint16_t bg565) {
-#if USE_TERMINUS_FONT
-  drawChar6x10(tft, x, y, (unsigned char)(ch ? ch : ' '), fg565, bg565);
+#if USE_IOSEVKA_FONT
+  uint16_t codepoint = (unsigned char)(ch ? ch : ' ');
+  const GFXfont* font = getFontForChar(codepoint);
+  
+  if (font) {
+    // Fill cell background
+    tft.fillRect(x, y, CHAR_W, CHAR_H, bg565);
+    
+    // Set font and colors
+    tft.setFreeFont(font);
+    tft.setTextColor(fg565, bg565);
+    
+    // Draw character - GFX fonts handle their own positioning
+    // We need to adjust for fixed-width terminal cells
+    tft.drawChar(codepoint, x, y);
+  } else {
+    // Fallback: fill cell with background
+    tft.fillRect(x, y, CHAR_W, CHAR_H, bg565);
+  }
 #else
   tft.setTextColor(fg565, bg565);
   tft.drawChar(ch ? ch : ' ', x, y, FONT_NUM);
