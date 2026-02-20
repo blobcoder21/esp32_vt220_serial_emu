@@ -53,6 +53,9 @@ int16_t curX = 0, curY = 0;
 uint8_t curFG = DEFAULT_FG;
 uint8_t curBG = DEFAULT_BG;
 bool    cursorVisible = true;
+#define CURSOR_BLINK_MS  530
+uint32_t cursorBlinkLast = 0;
+bool     cursorBlinkOn   = true;
 
 // ── Escape sequence parser ────────────────────────────────────
 enum ParserState { S_NORMAL, S_ESC, S_CSI };
@@ -109,6 +112,20 @@ void drawCell(int16_t col, int16_t row) {
   int16_t x = col * CHAR_W;
   int16_t y = row * CHAR_H;
   tft.setTextColor(xterm256(c.fg), xterm256(c.bg));
+  tft.drawChar(c.ch ? c.ch : ' ', x, y, FONT_NUM);
+}
+
+// Draw cursor (block) at current position
+void drawCursorBlock() {
+  if (!cursorVisible || !screen) return;
+  int16_t x = curX * CHAR_W;
+  int16_t y = curY * CHAR_H;
+  uint16_t fg = xterm256(curFG);
+  uint16_t bg = xterm256(curBG);
+  tft.fillRect(x, y, CHAR_W, CHAR_H, bg);
+  // Invert: draw char in bg color on fg, or simple block
+  tft.setTextColor(bg, fg);
+  Cell& c = cellAt(curX, curY);
   tft.drawChar(c.ch ? c.ch : ' ', x, y, FONT_NUM);
 }
 
@@ -261,11 +278,11 @@ void dispatchCSI(char cmd) {
           curBG = p - 100 + 8; // bright bg
         } else if (p == 38 && i + 2 < csiParamCount && csiParams[i+1] == 5) {
           // ESC[38;5;nm — xterm-256 fg
-          curFG = csiParams[i + 2];
+          curFG = (uint8_t)min(255, max(0, csiParams[i + 2]));
           i += 2;
         } else if (p == 48 && i + 2 < csiParamCount && csiParams[i+1] == 5) {
           // ESC[48;5;nm — xterm-256 bg
-          curBG = csiParams[i + 2];
+          curBG = (uint8_t)min(255, max(0, csiParams[i + 2]));
           i += 2;
         }
         // 38;2;r;g;b truecolor — map to nearest 256 not implemented, skip
