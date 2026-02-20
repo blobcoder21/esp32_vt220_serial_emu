@@ -140,15 +140,16 @@ static inline void drawCharAt(int16_t x, int16_t y, char ch, uint16_t fg565, uin
   const GFXfont* font = getFontForChar(codepoint);
   
   if (font) {
-    // Fill cell background
+    // Fill cell background first
     tft.fillRect(x, y, CHAR_W, CHAR_H, bg565);
     
     // Set font and colors
     tft.setFreeFont(font);
     tft.setTextColor(fg565, bg565);
+    tft.setTextDatum(TL_DATUM); // Top-left datum for consistent positioning
     
-    // Draw character - GFX fonts handle their own positioning
-    // We need to adjust for fixed-width terminal cells
+    // Draw character at cell position
+    // GFX fonts will render the glyph, and we've filled the background
     tft.drawChar(codepoint, x, y);
   } else {
     // Fallback: fill cell with background
@@ -465,8 +466,14 @@ void setup() {
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
+#if USE_IOSEVKA_FONT
+  // GFX fonts are set per-character in drawCharAt()
+  // Default to ASCII font for initial setup
+  tft.setFreeFont(&IosevkaASCII);
+#else
   tft.setTextFont(FONT_NUM);
   tft.setTextSize(1);
+#endif
 
   Serial.begin(115200);
 
