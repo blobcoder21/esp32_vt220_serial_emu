@@ -1,12 +1,15 @@
 /*************************************************************
-  VT100 / xterm-256 Terminal Emulator
+  VT220 / xterm-256 Terminal Emulator
   ESP32 N4R4 + ILI9341 240x320 TFT
   
   Wiring:
     GND  → target GND
     RX   → target TX
     TX   → target RX
-  
+    This can also apply to your Linux computer, if you are using UART to USB converter.
+    It also applies to Raspberry Pi.
+    This can also be used to monitor devices such as arduinos using same baud.
+
   Features:
     - xterm-256 colour (RGB565)
     - Cursor positioning
@@ -18,6 +21,10 @@
 
 #include <TFT_eSPI.h>
 #include <SPI.h>
+#include "font_6x10.h" //Will include Terminus once it is converted.//////////////////.
+
+// Use compiled 6x10 bitmap font (Terminus-style). Undef to use TFT_eSPI built-in font 1.
+#define USE_TERMINUS_FONT  1
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -107,12 +114,33 @@ inline Cell& cellAt(int16_t col, int16_t row) {
   return screen[row * COLS + col];
 }
 
+// Draw one 6x10 glyph from font_6x10 at (x,y). Uses 6 LSBs per row.
+void drawChar6x10(TFT_eSPI& tft, int16_t x, int16_t y, unsigned char c, uint16_t fg, uint16_t bg) {
+  if (c < FONT_6X10_FIRST || c > FONT_6X10_LAST) c = ' ';
+  const uint8_t* glyph = font6x10_data + (c - FONT_6X10_FIRST) * FONT_6X10_H;
+  for (int16_t row = 0; row < FONT_6X10_H; row++) {
+    uint8_t bits = pgm_read_byte(glyph + row) & 0x3F;
+    for (int16_t col = 0; col < FONT_6X10_W; col++) {
+      uint16_t color = (bits & (1 << (FONT_6X10_W - 1 - col))) ? fg : bg;
+      tft.drawPixel(x + col, y + row, color);
+    }
+  }
+}
+
+static inline void drawCharAt(int16_t x, int16_t y, char ch, uint16_t fg565, uint16_t bg565) {
+#if USE_TERMINUS_FONT
+  drawChar6x10(tft, x, y, (unsigned char)(ch ? ch : ' '), fg565, bg565);
+#else
+  tft.setTextColor(fg565, bg565);
+  tft.drawChar(ch ? ch : ' ', x, y, FONT_NUM);
+#endif
+}
+
 void drawCell(int16_t col, int16_t row) {
   Cell& c = cellAt(col, row);
   int16_t x = col * CHAR_W;
   int16_t y = row * CHAR_H;
-  tft.setTextColor(xterm256(c.fg), xterm256(c.bg));
-  tft.drawChar(c.ch ? c.ch : ' ', x, y, FONT_NUM);
+  drawCharAt(x, y, c.ch, xterm256(c.fg), xterm256(c.bg));
 }
 
 // Draw cursor (block) at current position
@@ -123,10 +151,7 @@ void drawCursorBlock() {
   uint16_t fg = xterm256(curFG);
   uint16_t bg = xterm256(curBG);
   tft.fillRect(x, y, CHAR_W, CHAR_H, bg);
-  // Invert: draw char in bg color on fg, or simple block
-  tft.setTextColor(bg, fg);
-  Cell& c = cellAt(curX, curY);
-  tft.drawChar(c.ch ? c.ch : ' ', x, y, FONT_NUM);
+  drawCharAt(x, y, cellAt(curX, curY).ch, bg, fg);  // inverted
 }
 
 void clearCell(int16_t col, int16_t row) {
@@ -137,19 +162,28 @@ void clearCell(int16_t col, int16_t row) {
   drawCell(col, row);
 }
 
-// ── Scroll up one row ─────────────────────────────────────────
+// ── Scroll buffer for hardware-backed scroll (one row of pixels) ─
+#define SCROLL_ROW_PIXELS  (SCREEN_W * CHAR_H)
+static uint16_t scrollRowBuf[SCROLL_ROW_PIXELS];
+
+// ── Scroll up one row (hardware-backed: readRect + pushRect) ───
 void scrollUp() {
   // Shift cell buffer up
   memmove(&screen[0], &screen[COLS], sizeof(Cell) * COLS * (ROWS - 1));
-  // Clear last row in buffer
-  for (int16_t col = 0; col < COLS; col++) {
+  for (int16_t col = 0; col < COLS; col++)
     cellAt(col, ROWS - 1) = {' ', curFG, curBG};
+
+  // Copy pixel rows up: row N+1 -> row N
+  for (int16_t row = 0; row < ROWS - 1; row++) {
+    int16_t srcY = (row + 1) * CHAR_H;
+    int16_t dstY = row * CHAR_H;
+    tft.readRect(0, srcY, SCREEN_W, CHAR_H, scrollRowBuf);
+    tft.pushRect(0, dstY, SCREEN_W, CHAR_H, scrollRowBuf);
   }
-  // Redraw entire screen (costly but correct)
-  // Could optimise with hardware scroll later
-  for (int16_t row = 0; row < ROWS; row++)
-    for (int16_t col = 0; col < COLS; col++)
-      drawCell(col, row);
+  // Clear and draw new bottom row
+  tft.fillRect(0, (ROWS - 1) * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
+  for (int16_t col = 0; col < COLS; col++)
+    drawCell(col, ROWS - 1);
 }
 
 // ── Cursor movement ───────────────────────────────────────────
@@ -314,15 +348,29 @@ void processByte(uint8_t b) {
       if (b == 0x1B) {
         parserState = S_ESC;
       } else if (b == '\r') {
+        drawCell(curX, curY);
         curX = 0;
+        drawCursorBlock();
+        cursorBlinkLast = millis();
+        cursorBlinkOn = true;
       } else if (b == '\n') {
+        drawCell(curX, curY);
         curY++;
         if (curY >= ROWS) {
           scrollUp();
           curY = ROWS - 1;
         }
+        drawCursorBlock();
+        cursorBlinkLast = millis();
+        cursorBlinkOn = true;
       } else if (b == '\b') {
-        if (curX > 0) curX--;
+        if (curX > 0) {
+          drawCell(curX, curY);
+          curX--;
+          drawCursorBlock();
+          cursorBlinkLast = millis();
+          cursorBlinkOn = true;
+        }
       } else if (b >= 0x20 && b < 0x7F) {
         putChar((char)b);
       }
