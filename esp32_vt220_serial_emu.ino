@@ -1,22 +1,21 @@
 /*************************************************************
   VT220 / xterm-256 Terminal Emulator
   ESP32 N4R4 + ILI9341 240x320 TFT
-  
+
   Wiring:
     GND  → target GND
     RX   → target TX
     TX   → target RX
-    This can also apply to your Linux computer, if you are using UART to USB converter.
-    It also applies to Raspberry Pi.
-    This can also be used to monitor devices such as arduinos using same baud.
+    (Linux/RPi/Arduino over UART or USB-serial.)
 
   Features:
+    - Envy GFX fonts (ASCII, box, blocks, braille)
     - xterm-256 colour (RGB565)
-    - Cursor positioning
-    - Clear screen / line
-    - Cursor movement (ABCD)
-    - Soft scroll
-    - Cell framebuffer in PSRAM
+    - Cursor positioning, movement (ABCD), home (H/f)
+    - Clear screen/line (J/K), erase to end/start
+    - In-place line updates: \r to start of line, overwrite; tab (\t)
+    - Bash-style: DECSC/DECRC (save/restore cursor), DEC private ?25h/?25l (cursor show/hide)
+    - Hardware-backed scroll, blinking cursor, cell framebuffer in PSRAM
  *************************************************************/
 
 
@@ -24,22 +23,20 @@
 #include <TFT_eSPI.h>
 #include <SPI.h>
 
-// Include Iosevka GFX fonts
-#include "fonts/iosevka_ascii.h"
-#include "fonts/iosevka_box.h"
-#include "fonts/iosevka_blocks.h"
-#include "fonts/iosevka_braille.h"
+// Include Envy GFX fonts (ASCII, box drawing, blocks, braille)
+#include "fonts/envy_ascii.h"
+#include "fonts/envy_box.h"
+#include "fonts/envy_blocks.h"
+#include "fonts/envy_braille.h"
 
-
-// Use Iosevka GFX fonts. Undef to use TFT_eSPI built-in font 1.
-
-#define USE_IOSEVKA_FONT  1
+#define USE_GFX_FONT  1   // Use Envy GFX fonts; undef for TFT_eSPI built-in font 1
+#define TAB_STOPS    8   // Tab stop interval (bash-style)
 
 TFT_eSPI tft = TFT_eSPI();
 
 // ── Grid dimensions ──────────────────────────────────────────
-#define CHAR_W       6    // Iosevka character width (pixels) - fixed for terminal
-#define CHAR_H      12    // Iosevka character height (yAdvance from font)
+#define CHAR_W       6    // Character width (pixels) - fixed for terminal
+#define CHAR_H      12    // Character height (yAdvance from font)
 #define FONT_NUM     1    // fallback font number
 
 #define COLS        40    // (240 / 6)
@@ -70,10 +67,13 @@ bool    cursorVisible = true;
 #define CURSOR_BLINK_MS  530
 uint32_t cursorBlinkLast = 0;
 bool     cursorBlinkOn   = true;
+// Saved cursor (DECSC/DECRC, bash prompt restore)
+int16_t saveCurX = 0, saveCurY = 0;
 
 // ── Escape sequence parser ────────────────────────────────────
 enum ParserState { S_NORMAL, S_ESC, S_CSI };
 ParserState parserState = S_NORMAL;
+bool        csiPrivate = false;  // ESC[?... (DEC private mode)
 
 #define MAX_PARAMS 8
 #define MAX_INTER  4
@@ -120,14 +120,14 @@ uint16_t xterm256(uint8_t idx) {
 // Returns GFXfont* for given Unicode codepoint, or nullptr if not found
 const GFXfont* getFontForChar(uint16_t codepoint) {
   if (codepoint >= 0x0020 && codepoint <= 0x007E) {
-    return &IosevkaASCII;
+    return &EnvyASCII;
   } else if (codepoint >= 0x2500 && codepoint <= 0x257F) {
-    return &IosevkaBox;
+    return &EnvyBox;
   } else if (codepoint >= 0x2580 && codepoint <= 0x259F) {
-    return &IosevkaBlocks;
+    return &EnvyBlocks;
   } else if (codepoint >= 0x2800 && codepoint <= 0x28FF) {
-    return &IosevkaBraille;
-  }
+    return &EnvyBraille;
+    }
   return nullptr;
 }
 
@@ -136,9 +136,9 @@ inline Cell& cellAt(int16_t col, int16_t row) {
   return screen[row * COLS + col];
 }
 
-// Draw one character using Iosevka GFX fonts at fixed cell position
+// Draw one character using GFX fonts at fixed cell position
 static inline void drawCharAt(int16_t x, int16_t y, char ch, uint16_t fg565, uint16_t bg565) {
-#if USE_IOSEVKA_FONT
+#if USE_GFX_FONT
   uint16_t codepoint = (unsigned char)(ch ? ch : ' ');
   const GFXfont* font = getFontForChar(codepoint);
   
@@ -169,6 +169,12 @@ void drawCell(int16_t col, int16_t row) {
   int16_t x = col * CHAR_W;
   int16_t y = row * CHAR_H;
   drawCharAt(x, y, c.ch, xterm256(c.fg), xterm256(c.bg));
+}
+
+// Redraw a single row (for in-place line updates, e.g. \r then overwrite, or ESC[K)
+void drawRow(int16_t row) {
+  for (int16_t col = 0; col < COLS; col++)
+    drawCell(col, row);
 }
 
 // Draw cursor (block) at current position
@@ -288,30 +294,27 @@ void dispatchCSI(char cmd) {
       );
       break;
 
-    // Erase in Display
+    // Erase in Display (bash: clear screen / clear to end)
     case 'J':
       if (p0 == 0) {
-        // Clear from cursor to end
         for (int16_t c = curX; c < COLS; c++) clearCell(c, curY);
         for (int16_t r = curY + 1; r < ROWS; r++)
           for (int16_t c = 0; c < COLS; c++) clearCell(c, r);
       } else if (p0 == 1) {
-        // Clear from start to cursor
         for (int16_t r = 0; r < curY; r++)
           for (int16_t c = 0; c < COLS; c++) clearCell(c, r);
         for (int16_t c = 0; c <= curX; c++) clearCell(c, curY);
-      } else if (p0 == 2) {
-        // Clear entire screen
+      } else if (p0 == 2 || p0 == 3) {
+        // 2 = clear all; 3 = clear all + scrollback (we only have screen)
         tft.fillScreen(xterm256(curBG));
         for (int16_t r = 0; r < ROWS; r++)
-          for (int16_t c = 0; c < COLS; c++) {
+          for (int16_t c = 0; c < COLS; c++)
             cellAt(c, r) = {' ', curFG, curBG};
-          }
         moveCursor(0, 0);
       }
       break;
 
-    // Erase in Line
+    // Erase in Line (bash uses this for clear-to-end-of-line)
     case 'K':
       if (p0 == 0) {
         for (int16_t c = curX; c < COLS; c++) clearCell(c, curY);
@@ -369,6 +372,23 @@ void dispatchCSI(char cmd) {
       break;
     }
 
+    // DEC private mode (ESC[?25h = show cursor, ESC[?25l = hide cursor)
+    case 'h':
+    case 'l':
+      if (csiPrivate) {
+        for (uint8_t k = 0; k < csiParamCount; k++) {
+          int16_t p = csiParams[k];
+          if (p == 25) {
+            cursorVisible = (cmd == 'h');
+            break;
+          }
+        }
+      }
+      break;
+
+    // Save cursor (DECSC) — also used by bash for prompt position
+    // Restore cursor (DECRC) — handled in ESC branch
+
     default:
       break;
   }
@@ -382,17 +402,30 @@ void processByte(uint8_t b) {
       if (b == 0x1B) {
         parserState = S_ESC;
       } else if (b == '\r') {
+        // Carriage return: move to start of line (in-place line update)
         drawCell(curX, curY);
         curX = 0;
         drawCursorBlock();
         cursorBlinkLast = millis();
         cursorBlinkOn = true;
-      } else if (b == '\n') {
+      } else if (b == '\n' || b == '\v' || b == '\f') {
+        // Newline / vertical tab / form feed: next line, scroll if needed
         drawCell(curX, curY);
         curY++;
         if (curY >= ROWS) {
           scrollUp();
           curY = ROWS - 1;
+        }
+        drawCursorBlock();
+        cursorBlinkLast = millis();
+        cursorBlinkOn = true;
+      } else if (b == '\t') {
+        // Tab: advance to next tab stop (bash-style)
+        drawCell(curX, curY);
+        curX = (curX / TAB_STOPS + 1) * TAB_STOPS;
+        if (curX >= COLS) {
+          curX = COLS - 1;
+          cursorAdvance();  // wrap to next line if at end
         }
         drawCursorBlock();
         cursorBlinkLast = millis();
@@ -413,15 +446,37 @@ void processByte(uint8_t b) {
     case S_ESC:
       if (b == '[') {
         parserState = S_CSI;
+        csiPrivate = false;
         csiParamCount = 0;
         csiInterCount = 0;
         memset(csiParams, 0, sizeof(csiParams));
         memset(csiInter, 0, sizeof(csiInter));
+      } else if (b == '7') {
+        // DECSC: save cursor (bash uses to restore prompt position)
+        saveCurX = curX;
+        saveCurY = curY;
+        parserState = S_NORMAL;
+      } else if (b == '8') {
+        // DECRC: restore cursor
+        moveCursor(saveCurX, saveCurY);
+        parserState = S_NORMAL;
+      } else if (b == 'M') {
+        // RI: reverse index (scroll down one line, move cursor up)
+        if (curY > 0) {
+          curY--;
+          drawCursorBlock();
+          cursorBlinkLast = millis();
+          cursorBlinkOn = true;
+        }
+        parserState = S_NORMAL;
       } else if (b == 'c') {
         // Full reset (RIS)
         curFG = DEFAULT_FG;
         curBG = DEFAULT_BG;
         moveCursor(0, 0);
+        saveCurX = 0;
+        saveCurY = 0;
+        cursorVisible = true;
         if (screen) {
           for (int16_t i = 0; i < COLS * ROWS; i++)
             screen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
@@ -429,13 +484,14 @@ void processByte(uint8_t b) {
         tft.fillScreen(xterm256(DEFAULT_BG));
         parserState = S_NORMAL;
       } else {
-        // Unknown ESC sequence, bail
         parserState = S_NORMAL;
       }
       break;
 
     case S_CSI:
-      if (b >= '0' && b <= '9') {
+      if (b == '?') {
+        csiPrivate = true;
+      } else if (b >= '0' && b <= '9') {
         if (csiParamCount == 0) csiParamCount = 1;
         csiParams[csiParamCount - 1] =
           csiParams[csiParamCount - 1] * 10 + (b - '0');
@@ -443,15 +499,12 @@ void processByte(uint8_t b) {
         csiParamCount++;
         if (csiParamCount >= MAX_PARAMS) csiParamCount = MAX_PARAMS - 1;
       } else if (b >= 0x20 && b <= 0x2F) {
-        // Intermediate byte
         if (csiInterCount < MAX_INTER)
           csiInter[csiInterCount++] = b;
       } else if (b >= 0x40 && b <= 0x7E) {
-        // Final byte — dispatch
         dispatchCSI((char)b);
         parserState = S_NORMAL;
       } else {
-        // Unexpected, abort
         parserState = S_NORMAL;
       }
       break;
@@ -475,10 +528,8 @@ void setup() {
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
-#if USE_IOSEVKA_FONT
-  // GFX fonts are set per-character in drawCharAt()
-  // Default to ASCII font for initial setup
-  tft.setFreeFont(&IosevkaASCII);
+#if USE_GFX_FONT
+  tft.setFreeFont(&EnvyASCII);
 #else
   tft.setTextFont(FONT_NUM);
   tft.setTextSize(1);
