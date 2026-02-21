@@ -19,14 +19,20 @@
     - Cell framebuffer in PSRAM
  *************************************************************/
 
+
+// Graphics 
 #include <TFT_eSPI.h>
 #include <SPI.h>
+
+// Include Iosevka GFX fonts
 #include "fonts/iosevka_ascii.h"
 #include "fonts/iosevka_box.h"
 #include "fonts/iosevka_blocks.h"
 #include "fonts/iosevka_braille.h"
 
+
 // Use Iosevka GFX fonts. Undef to use TFT_eSPI built-in font 1.
+
 #define USE_IOSEVKA_FONT  1
 
 TFT_eSPI tft = TFT_eSPI();
@@ -42,9 +48,6 @@ TFT_eSPI tft = TFT_eSPI();
 // Change SCREEN_W, SCREEN_H if needed
 #define SCREEN_W   240
 #define SCREEN_H   320
-
-// ── Login button ─────────────────────────────────────────────
-#define LOGIN_BTN   32
 
 // ── Default colours (xterm index) ────────────────────────────
 #define DEFAULT_FG  7     // white
@@ -483,7 +486,6 @@ void setup() {
 
   Serial.begin(115200);
 
-  pinMode(LOGIN_BTN, INPUT_PULLDOWN);
 }
 
 // ── Cursor blink (call from loop) ─────────────────────────────
@@ -509,9 +511,4 @@ void loop() {
 
   updateCursorBlink();
 
-  // Login button — sends username then password on second press
-  if (digitalRead(LOGIN_BTN) == HIGH) {
-    Serial.print("pfetch\r");
-    while (digitalRead(LOGIN_BTN) == HIGH);
-  }
 }
