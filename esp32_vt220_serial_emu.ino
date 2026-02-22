@@ -30,6 +30,7 @@
 #include "fonts/envy_braille.h"
 
 #define USE_GFX_FONT  1   // Use Envy GFX fonts; undef for TFT_eSPI built-in font 1
+#undef USE_GFX_FONT
 #define TAB_STOPS    8   // Tab stop interval (bash-style)
 
 TFT_eSPI tft = TFT_eSPI();
@@ -69,6 +70,10 @@ uint32_t cursorBlinkLast = 0;
 bool     cursorBlinkOn   = true;
 // Saved cursor (DECSC/DECRC, bash prompt restore)
 int16_t saveCurX = 0, saveCurY = 0;
+
+// ── Hardware scroll state ─────────────────────────────────────
+uint16_t scrollPtr = 0;   // pixel offset into display (VSCRSADD)
+uint8_t  rowOffset = 0;   // logical row 0 maps to physical row rowOffset
 
 // ── Escape sequence parser ────────────────────────────────────
 enum ParserState { S_NORMAL, S_ESC, S_CSI };
@@ -133,7 +138,8 @@ const GFXfont* getFontForChar(uint16_t codepoint) {
 
 // ── Cell helpers ──────────────────────────────────────────────
 inline Cell& cellAt(int16_t col, int16_t row) {
-  return screen[row * COLS + col];
+  uint8_t physRow = (uint8_t)((row + rowOffset) % ROWS);
+  return screen[physRow * COLS + col];
 }
 
 // Draw one character using GFX fonts at fixed cell position
@@ -167,7 +173,8 @@ static inline void drawCharAt(int16_t x, int16_t y, char ch, uint16_t fg565, uin
 void drawCell(int16_t col, int16_t row) {
   Cell& c = cellAt(col, row);
   int16_t x = col * CHAR_W;
-  int16_t y = row * CHAR_H;
+  int16_t physRow = (int16_t)((row + rowOffset) % ROWS);
+  int16_t y = physRow * CHAR_H;
   drawCharAt(x, y, c.ch, xterm256(c.fg), xterm256(c.bg));
 }
 
@@ -196,28 +203,30 @@ void clearCell(int16_t col, int16_t row) {
   drawCell(col, row);
 }
 
-// ── Scroll buffer for hardware-backed scroll (one row of pixels) ─
-#define SCROLL_ROW_PIXELS  (SCREEN_W * CHAR_H)
-static uint16_t scrollRowBuf[SCROLL_ROW_PIXELS];
+// ── Scroll buffer removed — hardware scroll needs no pixel buffer ─
 
-// ── Scroll up one row (hardware-backed: readRect + pushRect) ───
+// ── Scroll up one row (hardware-backed: VSCRSADD register) ─────
 void scrollUp() {
-  // Shift cell buffer up
-  memmove(&screen[0], &screen[COLS], sizeof(Cell) * COLS * (ROWS - 1));
+  // Clear the incoming bottom row in the cell ring buffer
+  // (rowOffset currently points to logical row 0's physical row,
+  //  so rowOffset % ROWS is the physical row that becomes the new bottom)
+  uint8_t physNewBottom = rowOffset % ROWS;
   for (int16_t col = 0; col < COLS; col++)
-    cellAt(col, ROWS - 1) = {' ', curFG, curBG};
+    screen[physNewBottom * COLS + col] = {' ', curFG, curBG};
 
-  // Copy pixel rows up: row N+1 -> row N
-  for (int16_t row = 0; row < ROWS - 1; row++) {
-    int16_t srcY = (row + 1) * CHAR_H;
-    int16_t dstY = row * CHAR_H;
-    tft.readRect(0, srcY, SCREEN_W, CHAR_H, scrollRowBuf);
-    tft.pushRect(0, dstY, SCREEN_W, CHAR_H, scrollRowBuf);
-  }
-  // Clear and draw new bottom row
-  tft.fillRect(0, (ROWS - 1) * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
-  for (int16_t col = 0; col < COLS; col++)
-    drawCell(col, ROWS - 1);
+  // Advance ring buffer offsets
+  rowOffset  = (rowOffset  + 1)      % ROWS;
+  scrollPtr  = (scrollPtr  + CHAR_H) % SCREEN_H;
+
+  // Single register write — the display does the rest
+  tft.writecommand(0x37);           // VSCRSADD
+  tft.writedata(scrollPtr >> 8);
+  tft.writedata(scrollPtr & 0xFF);
+
+  // Paint the new blank bottom row at its physical Y
+  int16_t physBottomRow = (int16_t)(((ROWS - 1) + rowOffset) % ROWS);
+  int16_t physY         = physBottomRow * CHAR_H;
+  tft.fillRect(0, physY, SCREEN_W, CHAR_H, xterm256(curBG));
 }
 
 // ── Cursor movement ───────────────────────────────────────────
@@ -536,6 +545,15 @@ void setup() {
 #endif
 
   Serial.begin(115200);
+
+  // Set full-screen vertical scroll area once — never needs changing
+  tft.writecommand(0x33);
+  tft.writedata(0x00); tft.writedata(0x00);   // TFA = 0
+  tft.writedata(0x01); tft.writedata(0x40);   // VSA = 320
+  tft.writedata(0x00); tft.writedata(0x00);   // BFA = 0
+
+  scrollPtr = 0;
+  rowOffset = 0;
 
 }
 
