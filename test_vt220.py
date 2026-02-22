@@ -38,6 +38,12 @@ def pause(msg: str = ""):
 
 # ── tests ─────────────────────────────────────────────────────
 
+def test_bash(tty: serial.Serial):
+    print("TEST: pipe bash to device")
+    print("type 'exit' or Ctrl+C to stop")
+    os.system(f"stty -F {TTY} {BAUD} cs8 -cstopb -parenb raw -echo")
+    os.system(f"bash > {TTY} 2>&1")
+
 def test_scroll(tty: serial.Serial):
     print("TEST: scroll — sending 60 numbered lines to force multiple scrolls")
     cls(tty)
@@ -180,6 +186,7 @@ TESTS = {
     "5": ("Erase sequences (EL/ED)",    test_erase),
     "6": ("Full clear ESC[2J",          test_cls),
     "7": ("DECSC/DECRC save/restore",   test_decsc),
+    "8": ("Execute bash on device",     test_bash),
     "a": ("Run ALL tests",              None),
     "q": ("Quit",                       None),
 }
