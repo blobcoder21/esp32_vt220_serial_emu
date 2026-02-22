@@ -207,28 +207,25 @@ void clearCell(int16_t col, int16_t row) {
 
 // ── Scroll up one row (hardware-backed: VSCRSADD register) ─────
 void scrollUp() {
-  // Clear the incoming bottom row in the cell ring buffer
-  // (rowOffset currently points to logical row 0's physical row,
-  //  so rowOffset % ROWS is the physical row that becomes the new bottom)
-  uint8_t physNewBottom = rowOffset % ROWS;
+  // Advance offsets FIRST
+  rowOffset = (rowOffset + 1)      % ROWS;
+  scrollPtr = (scrollPtr + CHAR_H) % SCREEN_H;
+
+  // New bottom logical row (ROWS-1) now maps to this physical row
+  uint8_t physNewBottom = (uint8_t)((rowOffset + ROWS - 1) % ROWS);
+
+  // Clear it in cell buffer
   for (int16_t col = 0; col < COLS; col++)
     screen[physNewBottom * COLS + col] = {' ', curFG, curBG};
 
-  // Advance ring buffer offsets
-  rowOffset  = (rowOffset  + 1)      % ROWS;
-  scrollPtr  = (scrollPtr  + CHAR_H) % SCREEN_H;
-
-  // Single register write — the display does the rest
-  tft.writecommand(0x37);           // VSCRSADD
+  // Single register write
+  tft.writecommand(0x37);
   tft.writedata(scrollPtr >> 8);
   tft.writedata(scrollPtr & 0xFF);
 
-  // Paint the new blank bottom row at its physical Y
-  int16_t physBottomRow = (int16_t)(((ROWS - 1) + rowOffset) % ROWS);
-  int16_t physY         = physBottomRow * CHAR_H;
-  tft.fillRect(0, physY, SCREEN_W, CHAR_H, xterm256(curBG));
+  // Paint blank bottom row
+  tft.fillRect(0, (int16_t)(physNewBottom * CHAR_H), SCREEN_W, CHAR_H, xterm256(curBG));
 }
-
 // ── Cursor movement ───────────────────────────────────────────
 void moveCursor(int16_t col, int16_t row) {
   int16_t ox = curX, oy = curY;
