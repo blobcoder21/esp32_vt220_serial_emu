@@ -40,12 +40,12 @@ TFT_eSPI tft = TFT_eSPI();
 #define CHAR_H      12    // Character height (yAdvance from font)
 #define FONT_NUM     1    // fallback font number
 
-#define COLS        40    // (240 / 6)
-#define ROWS        26    // (320 / 12) - adjusted for Iosevka yAdvance
+#define COLS        53    // (240 / 6)
+#define ROWS        20    // (320 / 12) - adjusted for yAdvance
 
 // Change SCREEN_W, SCREEN_H if needed
-#define SCREEN_W   240
-#define SCREEN_H   320
+#define SCREEN_W   320
+#define SCREEN_H   240
 
 
 // Scroll
@@ -219,6 +219,9 @@ void scrollUp() {
   memmove(&screen[0], &screen[COLS], sizeof(Cell) * COLS * (ROWS - 1));
   for (int16_t col = 0; col < COLS; col++)
     cellAt(col, ROWS - 1) = {' ', curFG, curBG};
+  memmove(&prev[0], &prev[COLS], sizeof(Cell) * COLS * (ROWS - 1));
+  memset(&prev[(ROWS - 1) * COLS], 0, sizeof(Cell) * COLS);  
+
 
   tft.readRect(0, CHAR_H, SCREEN_W, SCREEN_H - CHAR_H, pixScrollBuf);
   tft.pushRect(0, 0,      SCREEN_W, SCREEN_H - CHAR_H, pixScrollBuf);
