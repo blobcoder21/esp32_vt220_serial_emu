@@ -47,6 +47,11 @@ TFT_eSPI tft = TFT_eSPI();
 #define SCREEN_W   240
 #define SCREEN_H   320
 
+
+// Scroll
+#define SCROLL_PIX_H  (SCREEN_H - CHAR_H)
+#define SCROLL_PIX_SZ (SCREEN_W * SCROLL_PIX_H)
+
 // ── Default colours (xterm index) ────────────────────────────
 #define DEFAULT_FG  7     // white
 #define DEFAULT_BG  0     // black
@@ -60,7 +65,8 @@ struct Cell {
 
 // Allocated in PSRAM - buffers
 Cell* screen = nullptr;
-uint16_t* pixScrollBuf = nullptr; //PSRAM pixel buffer for scroll
+Cell prev[COLS * ROWS];
+static uint16_t* pixScrollBuf = nullptr;
 
 // ── Cursor ───────────────────────────────────────────────────
 int16_t curX = 0, curY = 0;
@@ -73,9 +79,6 @@ bool     cursorBlinkOn   = true;
 // Saved cursor (DECSC/DECRC, bash prompt restore)
 int16_t saveCurX = 0, saveCurY = 0;
 
-// ── Hardware scroll state ─────────────────────────────────────
-uint16_t scrollPtr = 0;   // pixel offset into display (VSCRSADD)
-uint8_t  rowOffset = 0;   // logical row 0 maps to physical row rowOffset
 
 // ── Escape sequence parser ────────────────────────────────────
 enum ParserState { S_NORMAL, S_ESC, S_CSI };
@@ -140,8 +143,11 @@ const GFXfont* getFontForChar(uint16_t codepoint) {
 
 // ── Cell helpers ──────────────────────────────────────────────
 inline Cell& cellAt(int16_t col, int16_t row) {
-  uint8_t physRow = (uint8_t)((row + rowOffset) % ROWS);
-  return screen[physRow * COLS + col];
+  return screen[row * COLS + col];
+}
+
+inline Cell& prevAt(int16_t col, int16_t row) {
+  return prev[row * COLS + col];
 }
 
 // Draw one character using GFX fonts at fixed cell position
@@ -174,10 +180,13 @@ static inline void drawCharAt(int16_t x, int16_t y, char ch, uint16_t fg565, uin
 
 void drawCell(int16_t col, int16_t row) {
   Cell& c = cellAt(col, row);
+  Cell& p = prevAt(col, row);
   int16_t x = col * CHAR_W;
-  int16_t physRow = (int16_t)((row + rowOffset) % ROWS);
-  int16_t y = physRow * CHAR_H;
-  drawCharAt(x, y, c.ch, xterm256(c.fg), xterm256(c.bg));
+  int16_t y = row * CHAR_H;
+  if (c.ch != p.ch || c.fg != p.fg || c.bg != p.bg) {
+    drawCharAt(x, y, c.ch, xterm256(c.fg), xterm256(c.bg));
+    p = c;  // mark as drawn
+  }
 }
 
 // Redraw a single row (for in-place line updates, e.g. \r then overwrite, or ESC[K)
@@ -512,14 +521,24 @@ void setup() {
   // Allocate framebuffer in PSRAM
   screen = (Cell*)ps_malloc(sizeof(Cell) * COLS * ROWS);
   if (!screen) {
-    // Fallback to internal RAM — should not happen on N4R4
     screen = (Cell*)malloc(sizeof(Cell) * COLS * ROWS);
   }
 
-  // Blank the buffer
+  // Allocate pixel scroll buffer in PSRAM
+  // no fallback — if this fails on N4R4 something is very wrong
+  pixScrollBuf = (uint16_t*)ps_malloc(SCROLL_PIX_SZ * sizeof(uint16_t));
+  if (pixScrollBuf == nullptr) {
+    tft.fillScreen(TFT_RED);
+    while(1);
+  }
+
+
+  // Blank the screen buffer
   for (int16_t i = 0; i < COLS * ROWS; i++) {
     screen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
   }
+  // Prev starts zeroed — differs from screen so first render draws everything
+  memset(prev, 0, sizeof(prev));
 
   tft.init();
   tft.setRotation(1);
@@ -532,15 +551,6 @@ void setup() {
 #endif
 
   Serial.begin(115200);
-
-  // Set full-screen vertical scroll area once — never needs changing
-  tft.writecommand(0x33);
-  tft.writedata(0x00); tft.writedata(0x00);   // TFA = 0
-  tft.writedata(0x01); tft.writedata(0x40);   // VSA = 320
-  tft.writedata(0x00); tft.writedata(0x00);   // BFA = 0
-
-  scrollPtr = 0;
-  rowOffset = 0;
 
 }
 
