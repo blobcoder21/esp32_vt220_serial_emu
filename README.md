@@ -53,11 +53,11 @@ TX      →      target RX
 Flash to the ESP32-WROVER-E via Arduino IDE or `arduino-cli`. Connect UART to a Linux host, then on the host:
 
 ```bash
-# Allow access to the serial port
-sudo chmod 666 /dev/ttyUSB0
+sudo python test_vt220.py
 ```
 
-Open and redirect programs to it as you wish, maybe it will work, maybe not :P
+Or you can open and redirect programs to it as you wish, maybe it will work, maybe not :P. Make sure you use stty first!
+If you wanna run Bash it's in the ```bash test_vt220.py```.
 
 ## Dependencies
 
