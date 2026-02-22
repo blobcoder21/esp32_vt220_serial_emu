@@ -58,8 +58,10 @@ struct Cell {
   uint8_t  bg;
 };
 
-// Allocated in PSRAM
+// Allocated in PSRAM - buffers
 Cell* screen = nullptr;
+uint16_t* pixScrollBuf = nullptr; //PSRAM pixel buffer for scroll
+
 // ── Cursor ───────────────────────────────────────────────────
 int16_t curX = 0, curY = 0;
 uint8_t curFG = DEFAULT_FG;
@@ -203,28 +205,16 @@ void clearCell(int16_t col, int16_t row) {
   drawCell(col, row);
 }
 
-// ── Scroll buffer removed — hardware scroll needs no pixel buffer ─
-
-// ── Scroll up one row (hardware-backed: VSCRSADD register) ─────
+// ── Scroll up one row ─────
 void scrollUp() {
-  // Advance offsets FIRST
-  rowOffset = (rowOffset + 1)      % ROWS;
-  scrollPtr = (scrollPtr + CHAR_H) % SCREEN_H;
-
-  // New bottom logical row (ROWS-1) now maps to this physical row
-  uint8_t physNewBottom = (uint8_t)((rowOffset + ROWS - 1) % ROWS);
-
-  // Clear it in cell buffer
+  memmove(&screen[0], &screen[COLS], sizeof(Cell) * COLS * (ROWS - 1));
   for (int16_t col = 0; col < COLS; col++)
-    screen[physNewBottom * COLS + col] = {' ', curFG, curBG};
+    cellAt(col, ROWS - 1) = {' ', curFG, curBG};
 
-  // Single register write
-  tft.writecommand(0x37);
-  tft.writedata(scrollPtr >> 8);
-  tft.writedata(scrollPtr & 0xFF);
+  tft.readRect(0, CHAR_H, SCREEN_W, SCREEN_H - CHAR_H, pixScrollBuf);
+  tft.pushRect(0, 0,      SCREEN_W, SCREEN_H - CHAR_H, pixScrollBuf);
 
-  // Paint blank bottom row
-  tft.fillRect(0, (int16_t)(physNewBottom * CHAR_H), SCREEN_W, CHAR_H, xterm256(curBG));
+  tft.fillRect(0, SCREEN_H - CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
 }
 // ── Cursor movement ───────────────────────────────────────────
 void moveCursor(int16_t col, int16_t row) {
