@@ -72,3 +72,8 @@ Install both via Arduino Library Manager.
 - 40×26 grid — modern TUI apps expecting 80×24 minimum may render incorrectly
 - Braille / box drawing characters require a host terminal that sends the correct Unicode codepoints
 - Truecolor `38;2;r;g;b` sequences are silently ignored — 256 colour is the maximum
+
+## Guidelines / Recommendations
+
+So, I used a 40MHz SPI frequency. Recommended that you use this too as 27MHz is slow and 80MHz is unstable.
+A reminder that you have to wire up BOTH MOSI, AND MISO.
