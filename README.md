@@ -57,7 +57,7 @@ sudo python test_vt220.py
 ```
 
 Or you can open and redirect programs to it as you wish, maybe it will work, maybe not :P. Make sure you use stty first!
-If you wanna run Bash it's in the ```bash test_vt220.py```.
+If you wanna run Bash it's in the ```test_vt220.py```.
 
 ## Dependencies
 
