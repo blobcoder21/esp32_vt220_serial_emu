@@ -31,7 +31,7 @@ def cls(tty: serial.Serial):
     write(tty, csi("2J"))
     write(tty, csi("H"))
     time.sleep(0.2)
-    os.system("cls")   # your symlink
+    os.system("clear")
 
 def pause(msg: str = ""):
     input(f"\n  [ENTER] {msg}> ")
@@ -109,12 +109,12 @@ def test_cursor(tty: serial.Serial):
     print("TEST: cursor movement and positioning")
     cls(tty)
     # draw a border-ish thing using cursor positioning
-    write(tty, csi("1;1H")); write(tty, b"TL")   # top left
-    write(tty, csi("1;38H")); write(tty, b"TR")  # top right
-    write(tty, csi("12;1H")); write(tty, b"ML")  # mid left
-    write(tty, csi("12;38H")); write(tty, b"MR") # mid right
-    write(tty, csi("24;1H")); write(tty, b"BL")  # bottom left
-    write(tty, csi("24;38H")); write(tty, b"BR") # bottom right
+    write(tty, csi("2;1H")); write(tty, b"TL")   # top left
+    write(tty, csi("2;53H")); write(tty, b"TR")  # top right
+    write(tty, csi("11;1H")); write(tty, b"ML")  # mid left
+    write(tty, csi("11;53H")); write(tty, b"MR") # mid right
+    write(tty, csi("21;1H")); write(tty, b"BL")  # bottom left
+    write(tty, csi("21;53H")); write(tty, b"BR") # bottom right
     # relative moves
     write(tty, csi("10;20H"))
     write(tty, b"CENTER")

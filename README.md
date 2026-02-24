@@ -1,6 +1,8 @@
 # esp32_vt220_serial_emu
 
-A VT220 / xterm-256 serial terminal emulator running on an ESP32, driven to a cheap ILI9341 TFT display. Designed to receive bash output over UART and display it in a proper terminal grid with colour, cursor control, and hardware-backed scrolling.
+A serial terminal emulator running on an ESP32, driven to a ILI9341 TFT display. Designed to receive bash output over UART and display it in a proper terminal grid with colour, cursor control, and real scrolling.
+Essentially matches VT220 with xterm-like features/extensions.
+
 
 ## Hardware
 

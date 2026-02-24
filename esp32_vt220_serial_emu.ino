@@ -49,8 +49,7 @@ TFT_eSPI tft = TFT_eSPI();
 
 
 // Scroll
-#define SCROLL_PIX_H  (SCREEN_H - CHAR_H)
-#define SCROLL_PIX_SZ (SCREEN_W * SCROLL_PIX_H)
+
 
 // ── Default colours (xterm index) ────────────────────────────
 #define DEFAULT_FG  7     // white
@@ -66,7 +65,7 @@ struct Cell {
 // Allocated in PSRAM - buffers
 Cell* screen = nullptr;
 Cell prev[COLS * ROWS];
-static uint16_t* pixScrollBuf = nullptr;
+
 
 // ── Cursor ───────────────────────────────────────────────────
 int16_t curX = 0, curY = 0;
@@ -219,14 +218,15 @@ void scrollUp() {
   memmove(&screen[0], &screen[COLS], sizeof(Cell) * COLS * (ROWS - 1));
   for (int16_t col = 0; col < COLS; col++)
     cellAt(col, ROWS - 1) = {' ', curFG, curBG};
-  memmove(&prev[0], &prev[COLS], sizeof(Cell) * COLS * (ROWS - 1));
-  memset(&prev[(ROWS - 1) * COLS], 0, sizeof(Cell) * COLS);  
 
+  // Invalidate entire prev buffer — 0x7F is outside printable ASCII so
+  // every dirty check will fire and force a full redraw from screen[]
+  memset(prev, 0x7F, sizeof(prev));
 
-  tft.readRect(0, CHAR_H, SCREEN_W, SCREEN_H - CHAR_H, pixScrollBuf);
-  tft.pushRect(0, 0,      SCREEN_W, SCREEN_H - CHAR_H, pixScrollBuf);
+  for (int16_t row = 0; row < ROWS; row++)
+    drawRow(row);
 
-  tft.fillRect(0, SCREEN_H - CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
+  tft.fillRect(0, (ROWS - 1) * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
 }
 // ── Cursor movement ───────────────────────────────────────────
 void moveCursor(int16_t col, int16_t row) {
@@ -255,6 +255,7 @@ void cursorAdvance() {
 
 // ── Put a character at cursor ─────────────────────────────────
 void putChar(char ch) {
+
   Cell& c = cellAt(curX, curY);
   c.ch = ch;
   c.fg = curFG;
@@ -318,7 +319,9 @@ void dispatchCSI(char cmd) {
         for (int16_t r = 0; r < ROWS; r++)
           for (int16_t c = 0; c < COLS; c++)
             cellAt(c, r) = {' ', curFG, curBG};
+	memcpy(prev, screen, sizeof(Cell) * COLS * ROWS);
         moveCursor(0, 0);
+	drawCursorBlock();
       }
       break;
 
@@ -525,14 +528,6 @@ void setup() {
   screen = (Cell*)ps_malloc(sizeof(Cell) * COLS * ROWS);
   if (!screen) {
     screen = (Cell*)malloc(sizeof(Cell) * COLS * ROWS);
-  }
-
-  // Allocate pixel scroll buffer in PSRAM
-  // no fallback — if this fails on N4R4 something is very wrong
-  pixScrollBuf = (uint16_t*)ps_malloc(SCROLL_PIX_SZ * sizeof(uint16_t));
-  if (pixScrollBuf == nullptr) {
-    tft.fillScreen(TFT_RED);
-    while(1);
   }
 
 
