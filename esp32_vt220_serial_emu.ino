@@ -261,6 +261,7 @@ void putChar(char ch) {
   c.fg = curFG;
   c.bg = curBG;
   drawCell(curX, curY);
+  prevAt(curX, curY).ch = 0x7F;
   cursorAdvance();
   drawCursorBlock();
   cursorBlinkLast = millis();
