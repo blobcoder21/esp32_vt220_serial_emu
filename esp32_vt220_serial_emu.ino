@@ -14,8 +14,7 @@
     - Cursor positioning, movement (ABCD), home (H/f)
     - Clear screen/line (J/K), erase to end/start
     - In-place line updates: \r to start of line, overwrite; tab (\t)
-    - Bash-style: DECSC/DECRC (save/restore cursor), DEC private ?25h/?25l (cursor show/hide)
-    - Hardware-backed scroll, blinking cursor, cell framebuffer in PSRAM
+    - Cell framebuffer in PSRAM, cursorless output
  *************************************************************/
 
 
@@ -66,18 +65,10 @@ struct Cell {
 Cell* screen = nullptr;
 Cell prev[COLS * ROWS];
 
-
-// ── Cursor ───────────────────────────────────────────────────
+// ── Cursor position ───────────────────────────────────────────
 int16_t curX = 0, curY = 0;
 uint8_t curFG = DEFAULT_FG;
 uint8_t curBG = DEFAULT_BG;
-bool    cursorVisible = true;
-#define CURSOR_BLINK_MS  530
-uint32_t cursorBlinkLast = 0;
-bool     cursorBlinkOn   = true;
-// Saved cursor (DECSC/DECRC, bash prompt restore)
-int16_t saveCurX = 0, saveCurY = 0;
-
 
 // ── Escape sequence parser ────────────────────────────────────
 enum ParserState { S_NORMAL, S_ESC, S_CSI };
@@ -194,17 +185,6 @@ void drawRow(int16_t row) {
     drawCell(col, row);
 }
 
-// Draw cursor (block) at current position
-void drawCursorBlock() {
-  if (!cursorVisible || !screen) return;
-  int16_t x = curX * CHAR_W;
-  int16_t y = curY * CHAR_H;
-  uint16_t fg = xterm256(curFG);
-  uint16_t bg = xterm256(curBG);
-  tft.fillRect(x, y, CHAR_W, CHAR_H, bg);
-  drawCharAt(x, y, cellAt(curX, curY).ch, bg, fg);  // inverted
-}
-
 void clearCell(int16_t col, int16_t row) {
   Cell& c = cellAt(col, row);
   c.ch = ' ';
@@ -230,18 +210,17 @@ void scrollUp() {
 }
 // ── Cursor movement ───────────────────────────────────────────
 void moveCursor(int16_t col, int16_t row) {
+  prevAt(curX, curY).ch = 0x7F;  // force erase cursor artifact
   int16_t ox = curX, oy = curY;
   curX = constrain(col, 0, COLS - 1);
   curY = constrain(row, 0, ROWS - 1);
   if (ox != curX || oy != curY) {
-    drawCell(ox, oy);  // erase cursor from old position
-    drawCursorBlock();
-    cursorBlinkLast = millis();
-    cursorBlinkOn = true;
+    drawCell(ox, oy);  // repaint cell at old position
   }
 }
 
 void cursorAdvance() {
+  prevAt(curX, curY).ch = 0x7F;  // force erase cursor artifact
   curX++;
   if (curX >= COLS) {
     curX = 0;
@@ -263,9 +242,6 @@ void putChar(char ch) {
   drawCell(curX, curY);
   prevAt(curX, curY).ch = 0x7F;
   cursorAdvance();
-  drawCursorBlock();
-  cursorBlinkLast = millis();
-  cursorBlinkOn = true;
 }
 
 // ── CSI dispatch ──────────────────────────────────────────────
@@ -322,7 +298,6 @@ void dispatchCSI(char cmd) {
             cellAt(c, r) = {' ', curFG, curBG};
 	memcpy(prev, screen, sizeof(Cell) * COLS * ROWS);
         moveCursor(0, 0);
-	drawCursorBlock();
       }
       break;
 
@@ -384,22 +359,10 @@ void dispatchCSI(char cmd) {
       break;
     }
 
-    // DEC private mode (ESC[?25h = show cursor, ESC[?25l = hide cursor)
+    // DEC private mode — cursor show/hide no-op (cursorless terminal)
     case 'h':
     case 'l':
-      if (csiPrivate) {
-        for (uint8_t k = 0; k < csiParamCount; k++) {
-          int16_t p = csiParams[k];
-          if (p == 25) {
-            cursorVisible = (cmd == 'h');
-            break;
-          }
-        }
-      }
       break;
-
-    // Save cursor (DECSC) — also used by bash for prompt position
-    // Restore cursor (DECRC) — handled in ESC branch
 
     default:
       break;
@@ -417,20 +380,15 @@ void processByte(uint8_t b) {
         // Carriage return: move to start of line (in-place line update)
         drawCell(curX, curY);
         curX = 0;
-        drawCursorBlock();
-        cursorBlinkLast = millis();
-        cursorBlinkOn = true;
       } else if (b == '\n' || b == '\v' || b == '\f') {
         // Newline / vertical tab / form feed: next line, scroll if needed
         drawCell(curX, curY);
+	curX=0; //Reset anyway accounting for no carriage returns
         curY++;
         if (curY >= ROWS) {
           scrollUp();
           curY = ROWS - 1;
         }
-        drawCursorBlock();
-        cursorBlinkLast = millis();
-        cursorBlinkOn = true;
       } else if (b == '\t') {
         // Tab: advance to next tab stop (bash-style)
         drawCell(curX, curY);
@@ -439,16 +397,10 @@ void processByte(uint8_t b) {
           curX = COLS - 1;
           cursorAdvance();  // wrap to next line if at end
         }
-        drawCursorBlock();
-        cursorBlinkLast = millis();
-        cursorBlinkOn = true;
       } else if (b == '\b') {
         if (curX > 0) {
           drawCell(curX, curY);
           curX--;
-          drawCursorBlock();
-          cursorBlinkLast = millis();
-          cursorBlinkOn = true;
         }
       } else if (b >= 0x20 && b < 0x7F) {
         putChar((char)b);
@@ -464,31 +416,22 @@ void processByte(uint8_t b) {
         memset(csiParams, 0, sizeof(csiParams));
         memset(csiInter, 0, sizeof(csiInter));
       } else if (b == '7') {
-        // DECSC: save cursor (bash uses to restore prompt position)
-        saveCurX = curX;
-        saveCurY = curY;
+        // DECSC: no-op (no cursor to save)
         parserState = S_NORMAL;
       } else if (b == '8') {
-        // DECRC: restore cursor
-        moveCursor(saveCurX, saveCurY);
+        // DECRC: no-op (no cursor to restore)
         parserState = S_NORMAL;
       } else if (b == 'M') {
         // RI: reverse index (scroll down one line, move cursor up)
         if (curY > 0) {
           curY--;
-          drawCursorBlock();
-          cursorBlinkLast = millis();
-          cursorBlinkOn = true;
         }
         parserState = S_NORMAL;
       } else if (b == 'c') {
         // Full reset (RIS)
         curFG = DEFAULT_FG;
         curBG = DEFAULT_BG;
-        moveCursor(0, 0);
-        saveCurX = 0;
-        saveCurY = 0;
-        cursorVisible = true;
+        curX = 0; curY = 0;
         if (screen) {
           for (int16_t i = 0; i < COLS * ROWS; i++)
             screen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
@@ -553,27 +496,10 @@ void setup() {
 
 }
 
-// ── Cursor blink (call from loop) ─────────────────────────────
-void updateCursorBlink() {
-  if (!cursorVisible || !screen) return;
-  uint32_t now = millis();
-  if (now - cursorBlinkLast >= CURSOR_BLINK_MS) {
-    cursorBlinkLast = now;
-    cursorBlinkOn = !cursorBlinkOn;
-    if (cursorBlinkOn)
-      drawCursorBlock();
-    else
-      drawCell(curX, curY);
-  }
-}
-
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
   // Drain serial into parser
   while (Serial.available()) {
     processByte((uint8_t)Serial.read());
   }
-
-  updateCursorBlink();
-
 }
