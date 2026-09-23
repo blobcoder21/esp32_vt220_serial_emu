@@ -58,8 +58,8 @@ TFT_eSPI tft = TFT_eSPI();
 // ── Cell structure ────────────────────────────────────────────
 struct Cell {
   char     ch;
-  uint8_t  fg;   // xterm-256 index
-  uint8_t  bg;
+  uint8_t  fg_r, fg_g, fg_b;
+  uint8_t  bg_r, bg_g, bg_b;
 };
 
 // Allocated in PSRAM - buffers
@@ -69,8 +69,8 @@ Cell prev[COLS * ROWS];
 
 // ── Cursor ───────────────────────────────────────────────────
 int16_t curX = 0, curY = 0;
-uint8_t curFG = DEFAULT_FG;
-uint8_t curBG = DEFAULT_BG;
+uint8_t curFG_r = 170, curFG_g = 170, curFG_b = 170; // DEFAULT_FG (7) 0xAAAAAA
+uint8_t curBG_r = 0,   curBG_g = 0,   curBG_b = 0;   // DEFAULT_BG (0) 0x000000
 bool    cursorVisible = true;
 #define CURSOR_BLINK_MS  530
 uint32_t cursorBlinkLast = 0;
@@ -120,9 +120,8 @@ inline uint16_t rgb888to565(uint8_t r, uint8_t g, uint8_t b) {
   return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
 }
 
-// ── xterm-256 index → RGB565 ──────────────────────────────────
-uint16_t xterm256(uint8_t idx) {
-  uint8_t r, g, b;
+// ── xterm-256 index → RGB888 (canonical representation) ───────
+void xterm256_rgb(uint8_t idx, uint8_t &r, uint8_t &g, uint8_t &b) {
   if (idx < 16) {
     uint32_t c = pgm_read_dword(&ANSI16[idx]);
     r = (c >> 16) & 0xFF;
@@ -137,7 +136,6 @@ uint16_t xterm256(uint8_t idx) {
     uint8_t v = (idx - 232) * 10 + 8;
     r = g = b = v;
   }
-  return rgb888to565(r, g, b);
 }
 
 // ── Font lookup ───────────────────────────────────────────────
@@ -164,29 +162,26 @@ inline Cell& prevAt(int16_t col, int16_t row) {
   return prev[row * COLS + col];
 }
 
-// Draw one character using GFX fonts at fixed cell position
-static inline void drawCharAt(int16_t x, int16_t y, char ch, uint16_t fg565, uint16_t bg565) {
+// Draw one character using GFX fonts at fixed cell position (RGB888 -> RGB565)
+static inline void drawCharAt(int16_t x, int16_t y, char ch, uint8_t r, uint8_t g, uint8_t b, uint8_t br, uint8_t bg, uint8_t bb) {
 #if USE_GFX_FONT
+  uint16_t fg565 = rgb888to565(r, g, b);
+  uint16_t bg565 = rgb888to565(br, bg, bb);
   uint16_t codepoint = (unsigned char)(ch ? ch : ' ');
   const GFXfont* font = getFontForChar(codepoint);
   
   if (font) {
-    // Fill cell background first
     tft.fillRect(x, y, CHAR_W, CHAR_H, bg565);
-    
-    // Set font and colors
     tft.setFreeFont(font);
     tft.setTextColor(fg565, bg565);
-    tft.setTextDatum(TL_DATUM); // Top-left datum for consistent positioning
-    
-    // Draw character at cell position
-    // GFX fonts will render the glyph, and we've filled the background
+    tft.setTextDatum(TL_DATUM);
     tft.drawChar(codepoint, x, y);
   } else {
-    // Fallback: fill cell with background
     tft.fillRect(x, y, CHAR_W, CHAR_H, bg565);
   }
 #else
+  uint16_t fg565 = rgb888to565(r, g, b);
+  uint16_t bg565 = rgb888to565(br, bg, bb);
   tft.setTextColor(fg565, bg565);
   tft.drawChar(ch ? ch : ' ', x, y, FONT_NUM);
 #endif
@@ -197,8 +192,8 @@ void drawCell(int16_t col, int16_t row) {
   Cell& p = prevAt(col, row);
   int16_t x = col * CHAR_W;
   int16_t y = row * CHAR_H;
-  if (c.ch != p.ch || c.fg != p.fg || c.bg != p.bg) {
-    drawCharAt(x, y, c.ch, xterm256(c.fg), xterm256(c.bg));
+  if (c.ch != p.ch || c.fg_r != p.fg_r || c.fg_g != p.fg_g || c.fg_b != p.fg_b || c.bg_r != p.bg_r || c.bg_g != p.bg_g || c.bg_b != p.bg_b) {
+    drawCharAt(x, y, c.ch, c.fg_r, c.fg_g, c.fg_b, c.bg_r, c.bg_g, c.bg_b);
     p = c;  // mark as drawn
   }
 }
@@ -214,17 +209,17 @@ void drawCursorBlock() {
   if (!cursorVisible || !screen) return;
   int16_t x = curX * CHAR_W;
   int16_t y = curY * CHAR_H;
-  uint16_t fg = xterm256(curFG);
-  uint16_t bg = xterm256(curBG);
-  tft.fillRect(x, y, CHAR_W, CHAR_H, bg);
-  drawCharAt(x, y, cellAt(curX, curY).ch, bg, fg);  // inverted
+  Cell& curCell = cellAt(curX, curY);
+  tft.fillRect(x, y, CHAR_W, CHAR_H, rgb888to565(curBG_r, curBG_g, curBG_b));
+  // Inverted: text uses current bg, background uses current fg
+  drawCharAt(x, y, curCell.ch, curBG_r, curBG_g, curBG_b, curFG_r, curFG_g, curFG_b);
 }
 
 void clearCell(int16_t col, int16_t row) {
   Cell& c = cellAt(col, row);
   c.ch = ' ';
-  c.fg = curFG;
-  c.bg = curBG;
+  c.fg_r = curFG_r; c.fg_g = curFG_g; c.fg_b = curFG_b;
+  c.bg_r = curBG_r; c.bg_g = curBG_g; c.bg_b = curBG_b;
   drawCell(col, row);
 }
 
@@ -268,14 +263,18 @@ void scrollUp() {
   // Move content up within region
   memmove(&screen[start * COLS], &screen[(start + 1) * COLS], sizeof(Cell) * COLS * (end - start));
   // Clear bottom line of region
-  for (int16_t col = 0; col < COLS; col++)
-    cellAt(col, end) = {' ', curFG, curBG};
+  for (int16_t col = 0; col < COLS; col++) {
+    Cell& c = cellAt(col, end);
+    c.ch = ' ';
+    c.fg_r = curFG_r; c.fg_g = curFG_g; c.fg_b = curFG_b;
+    c.bg_r = curBG_r; c.bg_g = curBG_g; c.bg_b = curBG_b;
+  }
   // Invalidate prev for region
   memset(&prev[start * COLS], 0x7F, sizeof(prev[0]) * COLS * (end - start + 1));
   // Redraw region
   for (int16_t row = start; row <= end; row++)
     drawRow(row);
-  tft.fillRect(0, end * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
+  tft.fillRect(0, end * CHAR_H, SCREEN_W, CHAR_H, rgb888to565(curBG_r, curBG_g, curBG_b));
 }
 
 // ── Scroll down one row (within scroll region) ─────
@@ -286,12 +285,16 @@ void scrollDown() {
   // Move content down within region
   memmove(&screen[(start + 1) * COLS], &screen[start * COLS], sizeof(Cell) * COLS * (end - start));
   // Clear top line of region
-  for (int16_t col = 0; col < COLS; col++)
-    cellAt(col, start) = {' ', curFG, curBG};
+  for (int16_t col = 0; col < COLS; col++) {
+    Cell& c = cellAt(col, start);
+    c.ch = ' ';
+    c.fg_r = curFG_r; c.fg_g = curFG_g; c.fg_b = curFG_b;
+    c.bg_r = curBG_r; c.bg_g = curBG_g; c.bg_b = curBG_b;
+  }
   memset(&prev[start * COLS], 0x7F, sizeof(prev[0]) * COLS * (end - start + 1));
   for (int16_t row = start; row <= end; row++)
     drawRow(row);
-  tft.fillRect(0, start * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
+  tft.fillRect(0, start * CHAR_H, SCREEN_W, CHAR_H, rgb888to565(curBG_r, curBG_g, curBG_b));
 }
 // ── Cursor movement ───────────────────────────────────────────
 void moveCursor(int16_t col, int16_t row) {
@@ -343,8 +346,8 @@ void putChar(char ch) {
 
   Cell& c = cellAt(curX, curY);
   c.ch = ch;
-  c.fg = curFG;
-  c.bg = curBG;
+  c.fg_r = curFG_r; c.fg_g = curFG_g; c.fg_b = curFG_b;
+  c.bg_r = curBG_r; c.bg_g = curBG_g; c.bg_b = curBG_b;
   drawCell(curX, curY);
   prevAt(curX, curY).ch = 0x7F;
   cursorAdvance();
@@ -401,10 +404,15 @@ void dispatchCSI(char cmd) {
         for (int16_t c = 0; c <= curX; c++) clearCell(c, curY);
       } else if (p0 == 2 || p0 == 3) {
         // 2 = clear all; 3 = clear all + scrollback (we only have screen)
-        tft.fillScreen(xterm256(curBG));
-        for (int16_t r = 0; r < ROWS; r++)
-          for (int16_t c = 0; c < COLS; c++)
-            cellAt(c, r) = {' ', curFG, curBG};
+        tft.fillScreen(rgb888to565(curBG_r, curBG_g, curBG_b));
+        for (int16_t r = 0; r < ROWS; r++) {
+          for (int16_t c = 0; c < COLS; c++) {
+            Cell& initCell = cellAt(c, r);
+            initCell.ch = ' ';
+            initCell.fg_r = curFG_r; initCell.fg_g = curFG_g; initCell.fg_b = curFG_b;
+            initCell.bg_r = curBG_r; initCell.bg_g = curBG_g; initCell.bg_b = curBG_b;
+          }
+        }
 	memcpy(prev, screen, sizeof(Cell) * COLS * ROWS);
         moveCursor(0, 0);
 	drawCursorBlock();
@@ -444,45 +452,56 @@ void dispatchCSI(char cmd) {
     // SGR — Select Graphic Rendition
     case 'm': {
       if (csiParamCount == 0) {
-        // ESC[m = reset
-        curFG = DEFAULT_FG;
-        curBG = DEFAULT_BG;
+        // ESC[m = reset to default RGB888
+        curFG_r = 170; curFG_g = 170; curFG_b = 170;
+        curBG_r = 0;   curBG_g = 0;   curBG_b = 0;
         break;
       }
       uint8_t i = 0;
       while (i < csiParamCount) {
         int16_t p = csiParams[i];
         if (p == 0) {
-          curFG = DEFAULT_FG;
-          curBG = DEFAULT_BG;
+          curFG_r = 170; curFG_g = 170; curFG_b = 170;
+          curBG_r = 0;   curBG_g = 0;   curBG_b = 0;
         } else if (p == 39) {
-          curFG = DEFAULT_FG;
+          curFG_r = 170; curFG_g = 170; curFG_b = 170;
         } else if (p == 49) {
-          curBG = DEFAULT_BG;
+          curBG_r = 0;   curBG_g = 0;   curBG_b = 0;
         } else if (p >= 30 && p <= 37) {
-          curFG = p - 30;
+          xterm256_rgb(p - 30, curFG_r, curFG_g, curFG_b);
         } else if (p >= 40 && p <= 47) {
-          curBG = p - 40;
+          xterm256_rgb(p - 40, curBG_r, curBG_g, curBG_b);
         } else if (p >= 90 && p <= 97) {
-          curFG = p - 90 + 8;  // bright fg
+          xterm256_rgb(p - 90 + 8, curFG_r, curFG_g, curFG_b); // bright fg
         } else if (p >= 100 && p <= 107) {
-          curBG = p - 100 + 8; // bright bg
+          xterm256_rgb(p - 100 + 8, curBG_r, curBG_g, curBG_b); // bright bg
+        } else if (p == 38 && i + 4 < csiParamCount && csiParams[i+1] == 2) {
+          // ESC[38;2;r;g;b — truecolour fg (RGB888)
+          curFG_r = (uint8_t)csiParams[i + 2];
+          curFG_g = (uint8_t)csiParams[i + 3];
+          curFG_b = (uint8_t)csiParams[i + 4];
+          i += 4;
         } else if (p == 38 && i + 2 < csiParamCount && csiParams[i+1] == 5) {
-          // ESC[38;5;nm — xterm-256 fg
+          // ESC[38;5;nm — xterm-256 fg (map to RGB888 canonical)
           int16_t val = csiParams[i + 2];
           if (val < 0) val = 0;
           if (val > 255) val = 255;
-          curFG = (uint8_t)val;
+          xterm256_rgb((uint8_t)val, curFG_r, curFG_g, curFG_b);
           i += 2;
+        } else if (p == 48 && i + 4 < csiParamCount && csiParams[i+1] == 2) {
+          // ESC[48;2;r;g;b — truecolour bg (RGB888)
+          curBG_r = (uint8_t)csiParams[i + 2];
+          curBG_g = (uint8_t)csiParams[i + 3];
+          curBG_b = (uint8_t)csiParams[i + 4];
+          i += 4;
         } else if (p == 48 && i + 2 < csiParamCount && csiParams[i+1] == 5) {
-          // ESC[48;5;nm — xterm-256 bg
+          // ESC[48;5;nm — xterm-256 bg (map to RGB888 canonical)
           int16_t val = csiParams[i + 2];
           if (val < 0) val = 0;
           if (val > 255) val = 255;
-          curBG = (uint8_t)val;
+          xterm256_rgb((uint8_t)val, curBG_r, curBG_g, curBG_b);
           i += 2;
         }
-        // 38;2;r;g;b truecolor — map to nearest 256 not implemented, skip
         i++;
       }
       break;
@@ -512,8 +531,12 @@ void dispatchCSI(char cmd) {
                 altScreenActive = true;
                 screen = altScreen ? altScreen : mainScreen;
                 if (altScreen) {
-                  for (int16_t i = 0; i < COLS * ROWS; i++)
-                    altScreen[i] = {' ', curFG, curBG};
+                  for (int16_t i = 0; i < COLS * ROWS; i++) {
+                    Cell& initAlt2 = altScreen[i];
+                    initAlt2.ch = ' ';
+                    initAlt2.fg_r = curFG_r; initAlt2.fg_g = curFG_g; initAlt2.fg_b = curFG_b;
+                    initAlt2.bg_r = curBG_r; initAlt2.bg_g = curBG_g; initAlt2.bg_b = curBG_b;
+                  }
                 }
                 memset(prev, 0x7F, sizeof(prev));
                 for (int16_t row = 0; row < ROWS; row++) drawRow(row);
@@ -539,8 +562,12 @@ void dispatchCSI(char cmd) {
                 altScreenActive = true;
                 screen = altScreen ? altScreen : mainScreen;
                 if (altScreen) {
-                  for (int16_t i = 0; i < COLS * ROWS; i++)
-                    altScreen[i] = {' ', curFG, curBG};
+                  for (int16_t i = 0; i < COLS * ROWS; i++) {
+                    Cell& initAlt2 = altScreen[i];
+                    initAlt2.ch = ' ';
+                    initAlt2.fg_r = curFG_r; initAlt2.fg_g = curFG_g; initAlt2.fg_b = curFG_b;
+                    initAlt2.bg_r = curBG_r; initAlt2.bg_g = curBG_g; initAlt2.bg_b = curBG_b;
+                  }
                 }
                 memset(prev, 0x7F, sizeof(prev));
                 for (int16_t row = 0; row < ROWS; row++) drawRow(row);
@@ -672,8 +699,8 @@ void processByte(uint8_t b) {
         parserState = S_NORMAL;
       } else if (b == 'c') {
         // Full reset (RIS)
-        curFG = DEFAULT_FG;
-        curBG = DEFAULT_BG;
+        curFG_r = 170; curFG_g = 170; curFG_b = 170; // DEFAULT_FG (7)
+        curBG_r = 0;   curBG_g = 0;   curBG_b = 0;   // DEFAULT_BG (0)
         moveCursor(0, 0);
         saveCurX = 0;
         saveCurY = 0;
@@ -687,11 +714,15 @@ void processByte(uint8_t b) {
         altScreenActive = false;
         screen = mainScreen;
         if (screen) {
-          for (int16_t i = 0; i < COLS * ROWS; i++)
-            screen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
+          for (int16_t i = 0; i < COLS * ROWS; i++) {
+            Cell& initCell = screen[i];
+            initCell.ch = ' ';
+            initCell.fg_r = 170; initCell.fg_g = 170; initCell.fg_b = 170; // DEFAULT_FG (7)
+            initCell.bg_r = 0; initCell.bg_g = 0; initCell.bg_b = 0; // DEFAULT_BG (0);
+          }
         }
         memset(prev, 0x7F, sizeof(prev));
-        tft.fillScreen(xterm256(DEFAULT_BG));
+        tft.fillScreen(rgb888to565(0, 0, 0)); // DEFAULT_BG (0)
         parserState = S_NORMAL;
       } else {
         parserState = S_NORMAL;
@@ -732,8 +763,18 @@ void setup() {
 
   // Blank both buffers
   for (int16_t i = 0; i < COLS * ROWS; i++) {
-    if (mainScreen) mainScreen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
-    if (altScreen) altScreen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
+    if (mainScreen) {
+      Cell& initMain = mainScreen[i];
+      initMain.ch = ' ';
+      initMain.fg_r = 170; initMain.fg_g = 170; initMain.fg_b = 170;
+      initMain.bg_r = 0; initMain.bg_g = 0; initMain.bg_b = 0;
+    }
+    if (altScreen) {
+      Cell& initAlt = altScreen[i];
+      initAlt.ch = ' ';
+      initAlt.fg_r = 170; initAlt.fg_g = 170; initAlt.fg_b = 170;
+      initAlt.bg_r = 0; initAlt.bg_g = 0; initAlt.bg_b = 0;
+    }
   }
   // Prev starts zeroed — differs from screen so first render draws everything
   memset(prev, 0x7F, sizeof(prev));

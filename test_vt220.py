@@ -229,6 +229,30 @@ def test_input_simulated(tty: serial.Serial):
     time.sleep(0.05)
     pause("simulated input: check ESP32 emitted ESC [ A / ESC O A")
 
+def test_colours_truecolor(tty: serial.Serial):
+    print("TEST: truecolour RGB888 foreground/background")
+    cls(tty)
+    colours = [
+        (255, 0, 0),
+        (0, 255, 0),
+        (0, 0, 255),
+        (255, 255, 255),
+        (41, 125, 255),
+        (128, 64, 192),
+    ]
+    for r, g, b in colours:
+        write(tty, csi(f"38;2;{r};{g};{b}m"))
+        write(tty, f" FG {r:03d},{g:03d},{b:03d} ".encode())
+        write(tty, csi("0m"))
+        write(tty, b"\r\n")
+    write(tty, b"\r\n")
+    for r, g, b in colours:
+        write(tty, csi(f"48;2;{r};{g};{b}m"))
+        write(tty, f" BG {r:03d},{g:03d},{b:03d} ".encode())
+        write(tty, csi("0m"))
+        write(tty, b"\r\n")
+    pause("check truecolour RGB888 foreground/background")
+
 TESTS = {
     "1": ("Scroll (60 lines)",          test_scroll),
     "2": ("ANSI 16 colours",            test_colours_ansi16),
@@ -242,6 +266,7 @@ TESTS = {
     "b": ("Scroll region (DECSTBM)",      test_scroll_region),
     "c": ("Alternate screen (1047)",      test_alternate_screen),
     "d": ("Simulated input sequences",    test_input_simulated),
+    "e": ("Truecolour RGB888",           test_colours_truecolor),
     "a": ("Run ALL tests",              None),
     "q": ("Quit",                       None),
 }
