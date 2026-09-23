@@ -178,6 +178,57 @@ def test_decsc(tty: serial.Serial):
 
 # ── menu ──────────────────────────────────────────────────────
 
+def test_dec_modes(tty: serial.Serial):
+    """Test DEC private modes: DECCKM (?1), DECAWM (?7), DECTCEM (?25), alternate screen (?1049)"""
+    print("TEST: DEC private modes (DECCKM, DECAWM, DECTCEM, 1049)")
+    cls(tty)
+    write(tty, csi("?1049h"))
+    write(tty, csi("?25h"))
+    write(tty, b"ALT SCREEN ACTIVE\r\n")
+    time.sleep(0.1)
+    write(tty, csi("?1h"))
+    write(tty, csi("?7h"))
+    time.sleep(0.1)
+    write(tty, csi("?1049l"))
+    write(tty, b"NORMAL SCREEN RESTORED\r\n")
+    time.sleep(0.1)
+    pause("check DEC private modes")
+
+def test_scroll_region(tty: serial.Serial):
+    """Test DECSTBM scroll region (CSI r)"""
+    print("TEST: scroll region (DECSTBM)")
+    cls(tty)
+    write(tty, csi("5;15r"))
+    for i in range(20):
+        write(tty, f"line {i:02d} in region\r\n")
+        time.sleep(0.02)
+    pause("check scroll region")
+    write(tty, csi("r"))
+
+def test_alternate_screen(tty: serial.Serial):
+    """Test alternate screen buffer (1047)"""
+    print("TEST: alternate screen buffer")
+    cls(tty)
+    write(tty, b"NORMAL SCREEN\r\n")
+    write(tty, csi("?1047h"))
+    write(tty, b"ALTERNATE SCREEN\r\n")
+    time.sleep(0.2)
+    write(tty, csi("?1047l"))
+    write(tty, b"BACK TO NORMAL\r\n")
+    time.sleep(0.2)
+    pause("check alternate screen")
+
+def test_input_simulated(tty: serial.Serial):
+    """Send simulated key presses (control bytes)"""
+    print("TEST: simulated input sequences")
+    cls(tty)
+    write(tty, b"Simulated input mapping:\r\n")
+    write(tty, b"0x01=Up 0x02=Down 0x03=Right 0x04=Left 0x11=F1\r\n")
+    tty.write(b"\x01")
+    tty.flush()
+    time.sleep(0.05)
+    pause("simulated input: check ESP32 emitted ESC [ A / ESC O A")
+
 TESTS = {
     "1": ("Scroll (60 lines)",          test_scroll),
     "2": ("ANSI 16 colours",            test_colours_ansi16),
@@ -187,6 +238,10 @@ TESTS = {
     "6": ("Full clear ESC[2J",          test_cls),
     "7": ("DECSC/DECRC save/restore",   test_decsc),
     "8": ("Execute bash on device",     test_bash),
+    "9": ("DEC private modes",           test_dec_modes),
+    "b": ("Scroll region (DECSTBM)",      test_scroll_region),
+    "c": ("Alternate screen (1047)",      test_alternate_screen),
+    "d": ("Simulated input sequences",    test_input_simulated),
     "a": ("Run ALL tests",              None),
     "q": ("Quit",                       None),
 }

@@ -14,7 +14,8 @@
     - Cursor positioning, movement (ABCD), home (H/f)
     - Clear screen/line (J/K), erase to end/start
     - In-place line updates: \r to start of line, overwrite; tab (\t)
-    - Cell framebuffer in PSRAM, cursorless output
+    - Bash-style: DECSC/DECRC (save/restore cursor), DEC private ?25h/?25l (cursor show/hide)
+    - Hardware-backed scroll, blinking cursor, cell framebuffer in PSRAM
  *************************************************************/
 
 
@@ -65,10 +66,33 @@ struct Cell {
 Cell* screen = nullptr;
 Cell prev[COLS * ROWS];
 
-// ── Cursor position ───────────────────────────────────────────
+
+// ── Cursor ───────────────────────────────────────────────────
 int16_t curX = 0, curY = 0;
 uint8_t curFG = DEFAULT_FG;
 uint8_t curBG = DEFAULT_BG;
+bool    cursorVisible = true;
+#define CURSOR_BLINK_MS  530
+uint32_t cursorBlinkLast = 0;
+bool     cursorBlinkOn   = true;
+// Saved cursor (DECSC/DECRC, bash prompt restore)
+int16_t saveCurX = 0, saveCurY = 0;
+
+// DEC private modes and terminal state
+bool    decawm = true;     // DECAWM (?7): auto-wrap mode (default ON per VT220 RM)
+bool    decckm = false;    // DECCKM (?1): cursor key application mode (default OFF)
+bool    dectcem = true;    // DECTCEM (?25): text cursor enable mode (default visible)
+bool    pendingWrap = false; // Internal: pending wrap after writing at right margin
+
+// Scroll region (DECSTBM)
+int16_t scrollTop = 0;
+int16_t scrollBottom = ROWS - 1;
+
+// Alternate screen buffers (1047/1048/1049)
+Cell* mainScreen = nullptr;
+Cell* altScreen = nullptr;
+bool  altScreenActive = false;
+
 
 // ── Escape sequence parser ────────────────────────────────────
 enum ParserState { S_NORMAL, S_ESC, S_CSI };
@@ -185,6 +209,17 @@ void drawRow(int16_t row) {
     drawCell(col, row);
 }
 
+// Draw cursor (block) at current position
+void drawCursorBlock() {
+  if (!cursorVisible || !screen) return;
+  int16_t x = curX * CHAR_W;
+  int16_t y = curY * CHAR_H;
+  uint16_t fg = xterm256(curFG);
+  uint16_t bg = xterm256(curBG);
+  tft.fillRect(x, y, CHAR_W, CHAR_H, bg);
+  drawCharAt(x, y, cellAt(curX, curY).ch, bg, fg);  // inverted
+}
+
 void clearCell(int16_t col, int16_t row) {
   Cell& c = cellAt(col, row);
   c.ch = ' ';
@@ -193,47 +228,118 @@ void clearCell(int16_t col, int16_t row) {
   drawCell(col, row);
 }
 
-// ── Scroll up one row ─────
+// ── Input sequences (cursor / function keys) ─────────────────
+void sendUp() {
+  if (decckm) { Serial.write("\033O"); Serial.write('A'); }
+  else { Serial.write("\033["); Serial.write('A'); }
+}
+void sendDown() {
+  if (decckm) { Serial.write("\033O"); Serial.write('B'); }
+  else { Serial.write("\033["); Serial.write('B'); }
+}
+void sendRight() {
+  if (decckm) { Serial.write("\033O"); Serial.write('C'); }
+  else { Serial.write("\033["); Serial.write('C'); }
+}
+void sendLeft() {
+  if (decckm) { Serial.write("\033O"); Serial.write('D'); }
+  else { Serial.write("\033["); Serial.write('D'); }
+}
+void sendHome() {
+  if (decckm) { Serial.write("\033O"); Serial.write('H'); }
+  else { Serial.write("\033["); Serial.write('H'); }
+}
+void sendEnd() {
+  if (decckm) { Serial.write("\033O"); Serial.write('F'); }
+  else { Serial.write("\033["); Serial.write('F'); }
+}
+void sendF1() { Serial.write("\033O"); Serial.write('P'); }
+void sendF2() { Serial.write("\033O"); Serial.write('Q'); }
+void sendF3() { Serial.write("\033O"); Serial.write('R'); }
+void sendF4() { Serial.write("\033O"); Serial.write('S'); }
+void sendInsert() { Serial.write("\033["); Serial.write("2~"); }
+void sendDelete() { Serial.write("\033["); Serial.write("3~"); }
+
+// ── Scroll up one row (within scroll region) ─────
 void scrollUp() {
-  memmove(&screen[0], &screen[COLS], sizeof(Cell) * COLS * (ROWS - 1));
+  int start = scrollTop;
+  int end = scrollBottom;
+  if (start >= end) return;
+  // Move content up within region
+  memmove(&screen[start * COLS], &screen[(start + 1) * COLS], sizeof(Cell) * COLS * (end - start));
+  // Clear bottom line of region
   for (int16_t col = 0; col < COLS; col++)
-    cellAt(col, ROWS - 1) = {' ', curFG, curBG};
-
-  // Invalidate entire prev buffer — 0x7F is outside printable ASCII so
-  // every dirty check will fire and force a full redraw from screen[]
-  memset(prev, 0x7F, sizeof(prev));
-
-  for (int16_t row = 0; row < ROWS; row++)
+    cellAt(col, end) = {' ', curFG, curBG};
+  // Invalidate prev for region
+  memset(&prev[start * COLS], 0x7F, sizeof(prev[0]) * COLS * (end - start + 1));
+  // Redraw region
+  for (int16_t row = start; row <= end; row++)
     drawRow(row);
+  tft.fillRect(0, end * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
+}
 
-  tft.fillRect(0, (ROWS - 1) * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
+// ── Scroll down one row (within scroll region) ─────
+void scrollDown() {
+  int start = scrollTop;
+  int end = scrollBottom;
+  if (start >= end) return;
+  // Move content down within region
+  memmove(&screen[(start + 1) * COLS], &screen[start * COLS], sizeof(Cell) * COLS * (end - start));
+  // Clear top line of region
+  for (int16_t col = 0; col < COLS; col++)
+    cellAt(col, start) = {' ', curFG, curBG};
+  memset(&prev[start * COLS], 0x7F, sizeof(prev[0]) * COLS * (end - start + 1));
+  for (int16_t row = start; row <= end; row++)
+    drawRow(row);
+  tft.fillRect(0, start * CHAR_H, SCREEN_W, CHAR_H, xterm256(curBG));
 }
 // ── Cursor movement ───────────────────────────────────────────
 void moveCursor(int16_t col, int16_t row) {
-  prevAt(curX, curY).ch = 0x7F;  // force erase cursor artifact
   int16_t ox = curX, oy = curY;
   curX = constrain(col, 0, COLS - 1);
   curY = constrain(row, 0, ROWS - 1);
   if (ox != curX || oy != curY) {
-    drawCell(ox, oy);  // repaint cell at old position
+    drawCell(ox, oy);  // erase cursor from old position
+    drawCursorBlock();
+    cursorBlinkLast = millis();
+    cursorBlinkOn = true;
   }
 }
 
 void cursorAdvance() {
-  prevAt(curX, curY).ch = 0x7F;  // force erase cursor artifact
-  curX++;
-  if (curX >= COLS) {
+  if (pendingWrap) {
+    pendingWrap = false;
     curX = 0;
     curY++;
-    if (curY >= ROWS) {
+    if (curY > scrollBottom) {
       scrollUp();
-      curY = ROWS - 1;
+      curY = scrollBottom;
+    }
+  } else {
+    curX++;
+    if (curX >= COLS) {
+      if (decawm) {
+        pendingWrap = true;
+        curX = COLS - 1; // Stay at right margin
+      } else {
+        curX = COLS - 1; // DECAWM off: stay at right margin
+      }
     }
   }
 }
 
 // ── Put a character at cursor ─────────────────────────────────
 void putChar(char ch) {
+  // Resolve pending wrap from previous right-margin write
+  if (pendingWrap) {
+    pendingWrap = false;
+    curX = 0;
+    curY++;
+    if (curY > scrollBottom) {
+      scrollUp();
+      curY = scrollBottom;
+    }
+  }
 
   Cell& c = cellAt(curX, curY);
   c.ch = ch;
@@ -242,6 +348,9 @@ void putChar(char ch) {
   drawCell(curX, curY);
   prevAt(curX, curY).ch = 0x7F;
   cursorAdvance();
+  drawCursorBlock();
+  cursorBlinkLast = millis();
+  cursorBlinkOn = true;
 }
 
 // ── CSI dispatch ──────────────────────────────────────────────
@@ -298,6 +407,7 @@ void dispatchCSI(char cmd) {
             cellAt(c, r) = {' ', curFG, curBG};
 	memcpy(prev, screen, sizeof(Cell) * COLS * ROWS);
         moveCursor(0, 0);
+	drawCursorBlock();
       }
       break;
 
@@ -311,6 +421,25 @@ void dispatchCSI(char cmd) {
         for (int16_t c = 0; c < COLS; c++) clearCell(c, curY);
       }
       break;
+
+    // DECSTBM — Set scroll region (CSI t ; b r, 1-indexed)
+    case 'r': {
+      if (p0 == 0 && p1 == 0) {
+        scrollTop = 0;
+        scrollBottom = ROWS - 1;
+      } else {
+        scrollTop = (p0 > 0 ? p0 - 1 : scrollTop);
+        scrollBottom = (p1 > 0 ? p1 - 1 : scrollBottom);
+        if (scrollTop < 0) scrollTop = 0;
+        if (scrollBottom >= ROWS) scrollBottom = ROWS - 1;
+        if (scrollTop > scrollBottom) {
+          // Invalid: reset to full screen
+          scrollTop = 0;
+          scrollBottom = ROWS - 1;
+        }
+      }
+      break;
+    }
 
     // SGR — Select Graphic Rendition
     case 'm': {
@@ -359,10 +488,80 @@ void dispatchCSI(char cmd) {
       break;
     }
 
-    // DEC private mode — cursor show/hide no-op (cursorless terminal)
+    // DEC private mode (ESC[? ... h / l)
     case 'h':
     case 'l':
+      if (csiPrivate) {
+        bool set = (cmd == 'h');
+        for (uint8_t k = 0; k < csiParamCount; k++) {
+          int16_t p = csiParams[k];
+          switch (p) {
+            case 1:   // DECCKM — Cursor Key Application Mode
+              decckm = set;
+              break;
+            case 7:   // DECAWM — Auto Wrap Mode (default ON)
+              decawm = set;
+              break;
+            case 25:  // DECTCEM — Cursor visibility
+              dectcem = set;
+              cursorVisible = set;
+              break;
+            case 47:  // Alternate screen buffer (original DEC)
+            case 1047: // Alternate screen buffer (xterm)
+              if (set) {
+                altScreenActive = true;
+                screen = altScreen ? altScreen : mainScreen;
+                if (altScreen) {
+                  for (int16_t i = 0; i < COLS * ROWS; i++)
+                    altScreen[i] = {' ', curFG, curBG};
+                }
+                memset(prev, 0x7F, sizeof(prev));
+                for (int16_t row = 0; row < ROWS; row++) drawRow(row);
+              } else {
+                altScreenActive = false;
+                screen = mainScreen ? mainScreen : altScreen;
+                memset(prev, 0x7F, sizeof(prev));
+                for (int16_t row = 0; row < ROWS; row++) drawRow(row);
+              }
+              break;
+            case 1048: // Save/restore cursor
+              if (set) {
+                saveCurX = curX;
+                saveCurY = curY;
+              } else {
+                moveCursor(saveCurX, saveCurY);
+              }
+              break;
+            case 1049: // Alternate screen + save/restore cursor
+              if (set) {
+                saveCurX = curX;
+                saveCurY = curY;
+                altScreenActive = true;
+                screen = altScreen ? altScreen : mainScreen;
+                if (altScreen) {
+                  for (int16_t i = 0; i < COLS * ROWS; i++)
+                    altScreen[i] = {' ', curFG, curBG};
+                }
+                memset(prev, 0x7F, sizeof(prev));
+                for (int16_t row = 0; row < ROWS; row++) drawRow(row);
+              } else {
+                altScreenActive = false;
+                screen = mainScreen ? mainScreen : altScreen;
+                moveCursor(saveCurX, saveCurY);
+                memset(prev, 0x7F, sizeof(prev));
+                for (int16_t row = 0; row < ROWS; row++) drawRow(row);
+              }
+              break;
+            // Ignore unknown/safe modes (66 DECNKM, 67 DECBKM, etc.)
+            default:
+              break;
+          }
+        }
+      }
       break;
+
+    // Save cursor (DECSC) — also used by bash for prompt position
+    // Restore cursor (DECRC) — handled in ESC branch
 
     default:
       break;
@@ -380,15 +579,25 @@ void processByte(uint8_t b) {
         // Carriage return: move to start of line (in-place line update)
         drawCell(curX, curY);
         curX = 0;
+        drawCursorBlock();
+        cursorBlinkLast = millis();
+        cursorBlinkOn = true;
       } else if (b == '\n' || b == '\v' || b == '\f') {
         // Newline / vertical tab / form feed: next line, scroll if needed
         drawCell(curX, curY);
-	curX=0; //Reset anyway accounting for no carriage returns
-        curY++;
-        if (curY >= ROWS) {
-          scrollUp();
-          curY = ROWS - 1;
+        // Resolve any pending wrap before moving to next line
+        if (pendingWrap) {
+          pendingWrap = false;
         }
+        curX = 0; // Reset to start of line
+        curY++;
+        if (curY > scrollBottom) {
+          scrollUp();
+          curY = scrollBottom;
+        }
+        drawCursorBlock();
+        cursorBlinkLast = millis();
+        cursorBlinkOn = true;
       } else if (b == '\t') {
         // Tab: advance to next tab stop (bash-style)
         drawCell(curX, curY);
@@ -397,13 +606,41 @@ void processByte(uint8_t b) {
           curX = COLS - 1;
           cursorAdvance();  // wrap to next line if at end
         }
+        drawCursorBlock();
+        cursorBlinkLast = millis();
+        cursorBlinkOn = true;
       } else if (b == '\b') {
         if (curX > 0) {
           drawCell(curX, curY);
           curX--;
+          drawCursorBlock();
+          cursorBlinkLast = millis();
+          cursorBlinkOn = true;
         }
       } else if (b >= 0x20 && b < 0x7F) {
         putChar((char)b);
+      } else if (b < 0x20) {
+        // Simulated keyboard input (lightweight, no physical keyboard needed)
+        switch (b) {
+          case 0x01: sendUp(); break;        // SOH = Cursor Up
+          case 0x02: sendDown(); break;      // STX = Cursor Down
+          case 0x03: sendRight(); break;     // ETX = Cursor Right
+          case 0x04: sendLeft(); break;      // EOT = Cursor Left
+          case 0x05: sendHome(); break;      // ENQ = Home
+          case 0x06: sendEnd(); break;       // ACK = End
+          case 0x11: sendF1(); break;        // DC1 = F1
+          case 0x12: sendF2(); break;        // DC2 = F2
+          case 0x13: sendF3(); break;        // DC3 = F3
+          case 0x14: sendF4(); break;        // DC4 = F4
+          case 0x15: Serial.write("\033[15~"); break; // NAK = F5
+          case 0x16: Serial.write("\033[17~"); break; // SYN = F6
+          case 0x17: Serial.write("\033[18~"); break; // ETB = F7
+          case 0x18: Serial.write("\033[19~"); break; // CAN = F8
+          case 0x19: Serial.write("\033[21~"); break; // EM = F10
+          default: break; // Ignore other control chars
+        }
+      } else if (b == 0x7F) {
+        sendDelete(); // DEL = Delete
       }
       break;
 
@@ -416,26 +653,44 @@ void processByte(uint8_t b) {
         memset(csiParams, 0, sizeof(csiParams));
         memset(csiInter, 0, sizeof(csiInter));
       } else if (b == '7') {
-        // DECSC: no-op (no cursor to save)
+        // DECSC: save cursor (bash uses to restore prompt position)
+        saveCurX = curX;
+        saveCurY = curY;
         parserState = S_NORMAL;
       } else if (b == '8') {
-        // DECRC: no-op (no cursor to restore)
+        // DECRC: restore cursor
+        moveCursor(saveCurX, saveCurY);
         parserState = S_NORMAL;
       } else if (b == 'M') {
         // RI: reverse index (scroll down one line, move cursor up)
         if (curY > 0) {
           curY--;
+          drawCursorBlock();
+          cursorBlinkLast = millis();
+          cursorBlinkOn = true;
         }
         parserState = S_NORMAL;
       } else if (b == 'c') {
         // Full reset (RIS)
         curFG = DEFAULT_FG;
         curBG = DEFAULT_BG;
-        curX = 0; curY = 0;
+        moveCursor(0, 0);
+        saveCurX = 0;
+        saveCurY = 0;
+        cursorVisible = true;
+        decawm = true;
+        decckm = false;
+        dectcem = true;
+        pendingWrap = false;
+        scrollTop = 0;
+        scrollBottom = ROWS - 1;
+        altScreenActive = false;
+        screen = mainScreen;
         if (screen) {
           for (int16_t i = 0; i < COLS * ROWS; i++)
             screen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
         }
+        memset(prev, 0x7F, sizeof(prev));
         tft.fillScreen(xterm256(DEFAULT_BG));
         parserState = S_NORMAL;
       } else {
@@ -468,19 +723,20 @@ void processByte(uint8_t b) {
 
 // ── Setup ─────────────────────────────────────────────────────
 void setup() {
-  // Allocate framebuffer in PSRAM
-  screen = (Cell*)ps_malloc(sizeof(Cell) * COLS * ROWS);
-  if (!screen) {
-    screen = (Cell*)malloc(sizeof(Cell) * COLS * ROWS);
-  }
+  // Allocate main and alternate screen buffers in PSRAM
+  mainScreen = (Cell*)ps_malloc(sizeof(Cell) * COLS * ROWS);
+  altScreen = (Cell*)ps_malloc(sizeof(Cell) * COLS * ROWS);
+  if (!mainScreen) mainScreen = (Cell*)malloc(sizeof(Cell) * COLS * ROWS);
+  if (!altScreen) altScreen = (Cell*)malloc(sizeof(Cell) * COLS * ROWS);
+  screen = mainScreen;
 
-
-  // Blank the screen buffer
+  // Blank both buffers
   for (int16_t i = 0; i < COLS * ROWS; i++) {
-    screen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
+    if (mainScreen) mainScreen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
+    if (altScreen) altScreen[i] = {' ', DEFAULT_FG, DEFAULT_BG};
   }
   // Prev starts zeroed — differs from screen so first render draws everything
-  memset(prev, 0, sizeof(prev));
+  memset(prev, 0x7F, sizeof(prev));
 
   tft.init();
   tft.setRotation(1);
@@ -496,10 +752,27 @@ void setup() {
 
 }
 
+// ── Cursor blink (call from loop) ─────────────────────────────
+void updateCursorBlink() {
+  if (!cursorVisible || !screen) return;
+  uint32_t now = millis();
+  if (now - cursorBlinkLast >= CURSOR_BLINK_MS) {
+    cursorBlinkLast = now;
+    cursorBlinkOn = !cursorBlinkOn;
+    if (cursorBlinkOn)
+      drawCursorBlock();
+    else
+      drawCell(curX, curY);
+  }
+}
+
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
   // Drain serial into parser
   while (Serial.available()) {
     processByte((uint8_t)Serial.read());
   }
+
+  updateCursorBlink();
+
 }
